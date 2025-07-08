@@ -625,7 +625,7 @@ async def create_product(
 
     thumbnail_url = None
     if new_product.images:
-        thumbnail_image = next((img for img in new_product.images if img.is_thumbnail), product.images[0]) # Usar product.images[0] como fallback
+        thumbnail_image = next((img for img in new_product.images if img.is_thumbnail), new_product.images[0]) # Usar new_product.images[0] como fallback
         thumbnail_url = thumbnail_image.image_url
 
     response_data = new_product.__dict__
