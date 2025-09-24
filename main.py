@@ -9,6 +9,7 @@ import os
 from dotenv import load_dotenv
 from typing import List, Optional
 from passlib.context import CryptContext
+from sqlalchemy import Table
 
 # Importaciones para JWT
 from jose import JWTError, jwt
@@ -27,6 +28,11 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+user_interests_table = Table('user_interests', Base.metadata,
+    Column('user_id', Integer, ForeignKey('users.id', ondelete="CASCADE"), primary_key=True),
+    Column('category_id', Integer, ForeignKey('categories.id', ondelete="CASCADE"), primary_key=True)
+)
+
 # --- Modelos de la base de datos (SQLAlchemy) ---
 class User(Base):
     __tablename__ = "users"
@@ -42,6 +48,10 @@ class User(Base):
     gender = Column(String(20), nullable=True)
     occupation = Column(String(100), nullable=True)
     bio = Column(Text, nullable=True)
+    dni = Column(String(12), nullable=True, unique=True)
+    interests = relationship("Category", secondary=user_interests_table, back_populates="interested_users", lazy="joined")
+
+
 
     products_owned = relationship("Product", back_populates="owner")
     proposals_made = relationship("Proposal", foreign_keys="[Proposal.proposer_user_id]", back_populates="proposer")
@@ -55,6 +65,8 @@ class Category(Base):
     description = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    interested_users = relationship("User", secondary=user_interests_table, back_populates="interests")
+
 
     products_linked = relationship("Product", back_populates="category_obj")
 
@@ -140,9 +152,10 @@ app = FastAPI(
 
 from fastapi.middleware.cors import CORSMiddleware
 
+# CONFIGURACIÓN DE CORS
 origins = [
-    os.getenv("FRONTEND_URL", "http://localhost:5173"),
-    "http://localhost:8000",
+    "http://localhost:5173",    # La dirección principal de Vite
+    "http://127.0.0.1:5173",  # A veces el navegador usa esta IP, es bueno tenerla
 ]
 
 app.add_middleware(
@@ -191,6 +204,8 @@ class UserResponse(BaseModel):
     gender: str | None = None
     occupation: str | None = None
     bio: str | None = None
+    dni: str | None = None
+    interests: List[str] = []
 
     class Config:
         from_attributes = True
@@ -414,18 +429,39 @@ async def login(user_login: UserLogin, db: Session = Depends(get_db)):
     return {"access_token": access_token, "token_type": "bearer"}
 
 
+# main.py
+
 @app.get("/profile/{user_id}", response_model=UserResponse)
 async def get_user_profile(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para ver este perfil.")
     
-    user = db.query(User).filter(User.id == user_id).first()
+    # 1. Obtenemos el usuario y sus intereses (objetos) desde la BD
+    user = db.query(User).options(joinedload(User.interests)).filter(User.id == user_id).first()
+    
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Usuario no encontrado."
-        )
-    return user
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+
+    # 2. ✨ LA CORRECCIÓN CLAVE: Construimos un diccionario manualmente
+    #    Esto asegura que los datos tengan el formato correcto ANTES de la validación.
+    user_data = {
+        "id": user.id,
+        "full_name": user.full_name,
+        "email": user.email,
+        "agreed_terms": user.agreed_terms,
+        "created_at": user.created_at,
+        "phone": user.phone,
+        "address": user.address,
+        "date_of_birth": user.date_of_birth,
+        "gender": user.gender,
+        "occupation": user.occupation,
+        "bio": user.bio,
+        "dni": user.dni,
+        "interests": [interest.name for interest in user.interests] # Convertimos los objetos a strings
+    }
+    
+    # 3. Devolvemos el diccionario. FastAPI lo validará contra UserResponse y ahora sí funcionará.
+    return user_data
 
 class UserUpdate(BaseModel):
     full_name: str | None = None
@@ -436,7 +472,26 @@ class UserUpdate(BaseModel):
     gender: str | None = None
     occupation: str | None = None
     bio: str | None = None
+    dni: str | None = None
+    interest_ids: Optional[List[int]] = None
 
+class CategoryResponse(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
+
+@app.get("/categories", response_model=List[CategoryResponse])
+async def get_all_categories(db: Session = Depends(get_db)):
+    """Devuelve una lista de todas las categorías disponibles."""
+    categories = db.query(Category).order_by(Category.name).all()
+    return categories
+
+# main.py
+
+# --- 🔁 REEMPLAZA ESTA FUNCIÓN COMPLETA 🔁 ---
 @app.put("/profile/{user_id}", response_model=UserResponse)
 async def update_user_profile(user_id: int, user_data: UserUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if user_id != current_user.id:
@@ -444,19 +499,30 @@ async def update_user_profile(user_id: int, user_data: UserUpdate, db: Session =
 
     db_user = db.query(User).filter(User.id == user_id).first()
     if not db_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Usuario no encontrado."
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
 
     update_data = user_data.model_dump(exclude_unset=True)
+
+    # --- LÓGICA PARA ACTUALIZAR INTERESES ---
+    if 'interest_ids' in update_data:
+        interest_ids = update_data.pop('interest_ids')
+        if interest_ids is not None:
+            # Busca los objetos de categoría válidos
+            interests = db.query(Category).filter(Category.id.in_(interest_ids)).all()
+            # Actualiza la relación
+            db_user.interests = interests
+        else: # Si se envía una lista vacía o null
+            db_user.interests = []
+
     for key, value in update_data.items():
         setattr(db_user, key, value)
     
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
-    return db_user
+    
+    # Recargamos el perfil para incluir los nombres de los intereses en la respuesta
+    return await get_user_profile(user_id, db, db_user)
 
 @app.get("/users/{user_id}/products", response_model=List[ProductResponse])
 async def get_user_products(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -506,21 +572,46 @@ async def get_all_products_for_feed(db: Session = Depends(get_db)):
         joinedload(Product.images)
     ).filter(Product.is_active == True, Product.status == 'available').all()
 
+    # --- INICIO DE LA CORRECCIÓN ---
+    # En lugar de manipular __dict__, creamos la respuesta directamente.
+    
     response_products = []
     for product in products_db:
         thumbnail_url = None
+        # Busca la imagen thumbnail de forma segura
         if product.images:
-            thumbnail_image = next((img for img in product.images if img.is_thumbnail), product.images[0])
-            thumbnail_url = thumbnail_image.image_url
+            thumbnail_image = next((img for img in product.images if img.is_thumbnail), None)
+            if thumbnail_image:
+                thumbnail_url = thumbnail_image.image_url
+            else:
+                # Si no hay thumbnail específico, usa la primera imagen
+                thumbnail_url = product.images[0].image_url
 
-        product_data = product.__dict__
-        product_data["category_name"] = product.category_obj.name if product.category_obj else None
-        product_data["thumbnail_image_url"] = thumbnail_url
-        product_data["images"] = [ProductImageResponse.from_orm(img) for img in product.images]
+        # Construye el objeto de respuesta Pydantic directamente
+        # Esto es más seguro y explícito
+        response_product = ProductResponse(
+            id=product.id,
+            user_id=product.user_id,
+            category_id=product.category_id,
+            title=product.title,
+            description=product.description,
+            current_value_estimate=product.current_value_estimate,
+            condition=product.condition,
+            status=product.status,
+            preffered_exchange_items=product.preffered_exchange_items,
+            location=product.location,
+            is_active=product.is_active,
+            views_count=product.views_count,
+            created_at=product.created_at,
+            updated_at=product.updated_at,
+            category_name=product.category_obj.name if product.category_obj else "Sin categoría",
+            thumbnail_image_url=thumbnail_url,
+            images=[ProductImageResponse.from_orm(img) for img in product.images]
+        )
+        response_products.append(response_product)
         
-        response_products.append(ProductResponse(**product_data))
-    
     return response_products
+    # --- FIN DE LA CORRECCIÓN ---
 
 UPLOAD_DIR = "uploaded_images"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
