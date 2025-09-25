@@ -50,7 +50,7 @@ class User(Base):
     bio = Column(Text, nullable=True)
     dni = Column(String(12), nullable=True, unique=True)
     interests = relationship("Category", secondary=user_interests_table, back_populates="interested_users", lazy="joined")
-
+    profile_picture = Column(String(500), nullable=True) 
 
 
     products_owned = relationship("Product", back_populates="owner")
@@ -206,6 +206,7 @@ class UserResponse(BaseModel):
     bio: str | None = None
     dni: str | None = None
     interests: List[str] = []
+    profile_picture: str | None = None
 
     class Config:
         from_attributes = True
@@ -218,6 +219,12 @@ class Token(BaseModel):
 class TokenData(BaseModel):
     email: Optional[str] = None
     user_id: Optional[int] = None
+
+class PasswordUpdate(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_new_password: str
+
 
 # --- Configuración JWT ---
 SECRET_KEY = os.getenv("SECRET_KEY", "your_super_secret_key_that_you_should_change_in_production")
@@ -457,6 +464,7 @@ async def get_user_profile(user_id: int, db: Session = Depends(get_db), current_
         "occupation": user.occupation,
         "bio": user.bio,
         "dni": user.dni,
+        "profile_picture": user.profile_picture,
         "interests": [interest.name for interest in user.interests] # Convertimos los objetos a strings
     }
     
@@ -523,6 +531,61 @@ async def update_user_profile(user_id: int, user_data: UserUpdate, db: Session =
     
     # Recargamos el perfil para incluir los nombres de los intereses en la respuesta
     return await get_user_profile(user_id, db, db_user)
+
+@app.post("/profile/picture", response_model=UserResponse)
+async def upload_profile_picture(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Sube y actualiza la foto de perfil para el usuario autenticado.
+    """
+    # Usamos la misma función que para las imágenes de productos
+    image_url = await save_upload_file(file)
+
+    # Actualizamos el campo en la base de datos para el usuario actual
+    current_user.profile_picture = image_url
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+
+    # Devolvemos el perfil de usuario actualizado
+    return await get_user_profile(current_user.id, db, current_user)
+
+@app.put("/users/change-password", status_code=status.HTTP_200_OK)
+async def change_user_password(
+    password_data: PasswordUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Permite a un usuario autenticado cambiar su propia contraseña.
+    """
+    # Verificar que la nueva contraseña y la confirmación coincidan
+    if password_data.new_password != password_data.confirm_new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La nueva contraseña y la confirmación no coinciden."
+        )
+
+    # Verificar que la contraseña actual sea correcta
+    if not verify_password(password_data.current_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="La contraseña actual es incorrecta."
+        )
+
+    # Hashear la nueva contraseña
+    new_hashed_password = get_password_hash(password_data.new_password)
+
+    # Actualizar la contraseña en la base de datos
+    current_user.password_hash = new_hashed_password
+    db.add(current_user)
+    db.commit()
+
+    return {"message": "Contraseña actualizada exitosamente."}
+
 
 @app.get("/users/{user_id}/products", response_model=List[ProductResponse])
 async def get_user_products(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -804,8 +867,9 @@ async def create_proposal(
 
     return db_proposal
 
-# REEMPLAZADO: Tu anterior GET /proposals/my fue reemplazado por esta versión más completa
-@app.get("/api/v1/proposals/me", response_model=List[ConversationResponse])
+# main.py
+
+@app.get("/proposals/me", response_model=List[ConversationResponse])
 async def get_my_proposals(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -940,7 +1004,9 @@ class MessageCreate(BaseModel):
     proposal_id: int
     text: str
 
-@app.post("/api/v1/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
+# main.py
+
+@app.post("/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
 async def create_message(
     message_data: MessageCreate,
     db: Session = Depends(get_db),
@@ -981,7 +1047,9 @@ class MessageReadStatusUpdate(BaseModel):
     message_ids: List[int]
     is_read: bool
 
-@app.patch("/api/v1/messages/read_status", status_code=status.HTTP_200_OK)
+# main.py
+
+@app.patch("/messages/read_status", status_code=status.HTTP_200_OK)
 async def update_message_read_status(
     read_status_update: MessageReadStatusUpdate,
     db: Session = Depends(get_db),
