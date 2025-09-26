@@ -91,8 +91,8 @@ class Product(Base):
     owner = relationship("User", back_populates="products_owned")
     category_obj = relationship("Category", back_populates="products_linked")
     images = relationship("ProductImage", back_populates="product_obj", cascade="all, delete-orphan", order_by="ProductImage.upload_order")
-    proposals_offered = relationship("Proposal", foreign_keys="[Proposal.offered_product_id]", back_populates="offered_product")
-    proposals_requested = relationship("Proposal", foreign_keys="[Proposal.requested_product_id]", back_populates="requested_product")
+    proposals_offered = relationship("Proposal", foreign_keys="[Proposal.offered_product_id]", back_populates="offered_product", cascade="all, delete-orphan")
+    proposals_requested = relationship("Proposal", foreign_keys="[Proposal.requested_product_id]", back_populates="requested_product", cascade="all, delete-orphan")
 
 
 class ProductImage(Base):
@@ -353,6 +353,13 @@ class MessageResponse(BaseModel):
 
     class Config:
         from_attributes = True
+    
+class ProductUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    condition: Optional[str] = None
+    status: Optional[str] = None # Para cambiar el estado (disponible, intercambiado, etc.)
+    category_name: Optional[str] = None
 
 
 # NUEVO: Pydantic model para la información de intercambio dentro de una conversación
@@ -606,7 +613,7 @@ async def get_user_products(user_id: int, db: Session = Depends(get_db), current
     products_db = db.query(Product).options(
         joinedload(Product.category_obj),
         joinedload(Product.images)
-    ).filter(Product.user_id == user_id, Product.is_active == True, Product.status == 'available').all()
+    ).filter(Product.user_id == user_id, Product.is_active == True).order_by(Product.created_at.desc()).all()
 
     response_products = []
     for product in products_db:
@@ -1041,6 +1048,74 @@ async def create_message(
     db.commit() # Un segundo commit para la propuesta
 
     return MessageResponse.from_orm(new_message)
+
+@app.put("/products/{product_id}", response_model=ProductResponse)
+async def update_product(
+    product_id: int,
+    product_data: ProductUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Actualiza los detalles de un producto existente.
+    Solo el propietario del producto puede actualizarlo.
+    """
+    db_product = db.query(Product).filter(Product.id == product_id).first()
+
+    if not db_product:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado.")
+    
+    if db_product.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para editar este producto.")
+
+    # Extrae los datos que se enviaron para actualizar
+    update_data = product_data.model_dump(exclude_unset=True)
+    
+    # Manejo especial si se cambia la categoría
+    if "category_name" in update_data:
+        category = db.query(Category).filter(Category.name == update_data["category_name"]).first()
+        if not category:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"La categoría '{update_data['category_name']}' no es válida.")
+        db_product.category_id = category.id
+        del update_data["category_name"] # Se elimina para no intentar asignarlo directamente
+
+    # Actualiza el resto de los campos
+    for key, value in update_data.items():
+        setattr(db_product, key, value)
+
+    db_product.updated_at = datetime.utcnow()
+    db.add(db_product)
+    db.commit()
+    db.refresh(db_product)
+    
+    # Prepara y devuelve la respuesta completa del producto actualizado
+    thumbnail_url = next((img.image_url for img in db_product.images if img.is_thumbnail), db_product.images[0].image_url if db_product.images else None)
+    response_data = db_product.__dict__
+    response_data["category_name"] = db_product.category_obj.name
+    response_data["thumbnail_image_url"] = thumbnail_url
+    return ProductResponse(**response_data)
+
+
+@app.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_product(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Elimina un producto. Solo el propietario puede eliminarlo.
+    """
+    db_product = db.query(Product).filter(Product.id == product_id).first()
+
+    if not db_product:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado.")
+    
+    if db_product.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para eliminar este producto.")
+
+    db.delete(db_product)
+    db.commit()
+    return None
 
 # NUEVO: Endpoint para marcar mensajes como leídos
 class MessageReadStatusUpdate(BaseModel):
