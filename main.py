@@ -883,6 +883,7 @@ async def update_product(
     photo_order_ids: str = Form(''),
     deleted_photo_ids: str = Form(''),
     exchange_interest_ids: str = Form(''),
+    is_for_sale: bool = Form(...),
     new_photos: List[UploadFile] = File([])
 ):
     db_product = db.query(Product).options(
@@ -897,7 +898,7 @@ async def update_product(
     db_product.title = title
     db_product.description = description
     db_product.condition = condition
-    
+    db_product.is_for_sale = is_for_sale
     category = db.query(Category).filter(Category.name == category_name).first()
     if not category:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Categoría no válida.")
