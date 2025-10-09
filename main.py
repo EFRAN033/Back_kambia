@@ -726,6 +726,7 @@ async def create_product(
         user_username=new_product.owner.full_name,
         category_name=new_product.category_obj.name,
         thumbnail_image_url=thumbnail_url,
+        is_for_sale=new_product.is_for_sale, # <-- LÍNEA CORREGIDA
         images=[ProductImageResponse.from_orm(img) for img in new_product.images],
         exchange_interests=[interest.name for interest in new_product.exchange_interests]
     )
