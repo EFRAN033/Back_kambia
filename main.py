@@ -93,9 +93,10 @@ class Product(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     is_for_sale = Column(Boolean, default=False, nullable=False)
     views_count = Column(Integer, default=0, nullable=False)
+    
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    is_for_sale = Column(Boolean, default=False)
+    
 
 
     owner = relationship("User", back_populates="products_owned")
@@ -900,7 +901,7 @@ async def update_product(
     db_product.description = description
     db_product.condition = condition
     db_product.is_for_sale = is_for_sale
-    
+
     category = db.query(Category).filter(Category.name == category_name).first()
     if not category:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Categoría no válida.")
