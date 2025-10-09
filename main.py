@@ -91,9 +91,8 @@ class Product(Base):
     preffered_exchange_items = Column(Text, nullable=True)
     location = Column(String(255), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
-    is_for_sale = Column(Boolean, default=False, nullable=False)
+    is_for_sale = Column(Boolean, default=False, nullable=False) # <-- DEJA SOLO ESTA
     views_count = Column(Integer, default=0, nullable=False)
-    
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     
