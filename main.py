@@ -382,6 +382,7 @@ class ProductUpdate(BaseModel):
     condition: Optional[str] = None
     status: Optional[str] = None # Para cambiar el estado (disponible, intercambiado, etc.)
     category_name: Optional[str] = None
+    is_for_sale: Optional[bool] = None 
 
 
 # NUEVO: Pydantic model para la información de intercambio dentro de una conversación
@@ -899,6 +900,7 @@ async def update_product(
     db_product.description = description
     db_product.condition = condition
     db_product.is_for_sale = is_for_sale
+    
     category = db.query(Category).filter(Category.name == category_name).first()
     if not category:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Categoría no válida.")
