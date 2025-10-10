@@ -18,6 +18,10 @@ from fastapi.security import OAuth2PasswordBearer
 import aiofiles
 import uuid
 
+#Importaciones para la validacion de dni con PeruDevs
+import requests
+import re
+
 # --- Configuración de la base de datos ---
 load_dotenv()
 
@@ -192,6 +196,63 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def validate_dni_data(dni: str, full_name: str):
+    """Consulta el API de Perudevs para verificar que el DNI coincida con el nombre."""
+    
+    if not PERUDEVS_API_KEY:
+        # En un entorno real, podrías registrar esto o simplemente fallar la validación.
+        # Por ahora, lanzamos un error claro.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="La clave de API de validación de DNI no está configurada en el servidor."
+        )
+    
+    if not re.match(r"^\d{8}$", dni):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El DNI debe ser un valor de 8 dígitos."
+        )
+
+    try:
+        response = requests.get(
+            PERUDEVS_DNI_URL,
+            params={"document": dni, "key": PERUDEVS_API_KEY},
+            timeout=5 # Tiempo de espera máximo de 5 segundos
+        )
+        response.raise_for_status() # Lanza error para códigos 4xx/5xx
+
+        data = response.json()
+
+        if not data.get("estado"):
+            # Mensaje genérico de no coincidencia o no encontrado
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=data.get("mensaje", "DNI no encontrado o no activo en el registro nacional.")
+            )
+
+        # Normalizamos los nombres para la comparación
+        resultado = data.get("resultado", {})
+        nombre_api = resultado.get("nombre_completo", "").strip().upper()
+        
+        # El nombre del usuario puede tener mayúsculas/minúsculas y espacios extra
+        nombre_usuario_normalizado = " ".join(full_name.strip().upper().split())
+        
+        # Lógica de validación: Comparamos el nombre completo de la API con el ingresado.
+        if nombre_api != nombre_usuario_normalizado:
+            # Aquí la app es segura: si el nombre no coincide exactamente, rechazamos el registro.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El nombre completo no coincide con el número de DNI proporcionado."
+            )
+
+    except requests.RequestException as e:
+        # Error de conexión o timeout
+        print(f"Error al consultar API de Perudevs: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Fallo al verificar el DNI. Inténtalo más tarde."
+        )
 
 class UserCreate(BaseModel):
     full_name: str
@@ -418,19 +479,34 @@ async def root():
 
 @app.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(user: UserCreate, db: Session = Depends(get_db)):
+    # 1. Validación de contraseñas
     if user.password != user.confirm_password:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Las contraseñas no coinciden."
         )
 
-    existing_user = db.query(User).filter(User.email == user.email).first()
-    if existing_user:
+    # 2. Validación de DNI y Nombre con API externa
+    # Si la validación falla (no coincide o hay error), la función lanza una HTTPException.
+    validate_dni_data(dni=user.dni, full_name=user.full_name)
+
+    # 3. Verificación de existencia de DNI (añadida para mayor seguridad)
+    existing_dni_user = db.query(User).filter(User.dni == user.dni).first()
+    if existing_dni_user:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="El número de DNI ya está registrado por otro usuario."
+        )
+        
+    # 4. Verificación de existencia de email
+    existing_email_user = db.query(User).filter(User.email == user.email).first()
+    if existing_email_user:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="El correo electrónico ya está registrado."
         )
 
+    # 5. Creación de usuario
     hashed_password = get_password_hash(user.password)
 
     db_user = User(
@@ -444,15 +520,16 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_user)
     
+    # 6. Preparación de la respuesta
     user_data = {
         "id": db_user.id, "full_name": db_user.full_name, "email": db_user.email,
         "agreed_terms": db_user.agreed_terms, "created_at": db_user.created_at, "phone": db_user.phone,
         "address": db_user.address, "date_of_birth": db_user.date_of_birth, "gender": db_user.gender,
         "occupation": db_user.occupation, "bio": db_user.bio, "dni": db_user.dni,
-        "profile_picture": db_user.profile_picture, "interests": [interest.name for interest in db_user.interests]
+        "profile_picture": db_user.profile_picture, "credits": db_user.credits,
+        "interests": [interest.name for interest in db_user.interests]
     }
     return UserResponse(**user_data)
-
 
 @app.post("/login", response_model=Token)
 async def login(user_login: UserLogin, db: Session = Depends(get_db)):
