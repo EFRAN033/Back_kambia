@@ -55,6 +55,7 @@ class User(Base):
     occupation = Column(String(100), nullable=True)
     bio = Column(Text, nullable=True)
     dni = Column(String(12), nullable=True, unique=True)
+    credits = Column(Integer, default=10, nullable=False)
     interests = relationship("Category", secondary=user_interests_table, back_populates="interested_users", lazy="joined")
     profile_picture = Column(String(500), nullable=True)
 
@@ -91,7 +92,6 @@ class Product(Base):
     preffered_exchange_items = Column(Text, nullable=True)
     location = Column(String(255), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
-    is_for_sale = Column(Boolean, default=False, nullable=False) # <-- DEJA SOLO ESTA
     views_count = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
@@ -195,6 +195,7 @@ def get_db():
 
 class UserCreate(BaseModel):
     full_name: str
+    dni: str
     email: EmailStr
     password: str
     confirm_password: str
@@ -217,6 +218,7 @@ class UserResponse(BaseModel):
     occupation: str | None = None
     bio: str | None = None
     dni: str | None = None
+    credits: int
     interests: List[str] = []
     profile_picture: str | None = None
 
@@ -311,6 +313,7 @@ class ProductResponse(BaseModel):
     updated_at: datetime
     
     user_username: Optional[str] = None
+    user_avatar_url: Optional[str] = None
     category_name: Optional[str] = None
     thumbnail_image_url: Optional[str] = None
     images: List[ProductImageResponse] = []
@@ -388,10 +391,9 @@ class ProductUpdate(BaseModel):
 # NUEVO: Pydantic model para la información de intercambio dentro de una conversación
 class ExchangeDetailsResponse(BaseModel):
     id: int
-    offer: ProductPublicResponse # Producto ofrecido
-    request: ProductPublicResponse # Producto solicitado
-    message: Optional[str] = None # Mensaje inicial de la propuesta (no usado por ahora en el backend, pero útil para frontend)
-    date: datetime # created_at de la propuesta
+    offer: ProductPublicResponse
+    request: ProductPublicResponse
+    created_at: datetime  # <-- Cambio aplicado aquí
     status: str
 
     class Config:
@@ -434,6 +436,7 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
     db_user = User(
         full_name=user.full_name,
         email=user.email,
+        dni=user.dni,
         password_hash=hashed_password,
         agreed_terms=user.agreed_terms,
     )
@@ -484,7 +487,8 @@ async def get_user_profile(user_id: int, db: Session = Depends(get_db), current_
         "agreed_terms": user.agreed_terms, "created_at": user.created_at, "phone": user.phone,
         "address": user.address, "date_of_birth": user.date_of_birth, "gender": user.gender,
         "occupation": user.occupation, "bio": user.bio, "dni": user.dni,
-        "profile_picture": user.profile_picture, "interests": [interest.name for interest in user.interests]
+        "profile_picture": user.profile_picture, "interests": [interest.name for interest in user.interests],
+        "credits": user.credits
     }
     return UserResponse(**user_data)
 
@@ -499,6 +503,30 @@ class UserUpdate(BaseModel):
     bio: str | None = None
     dni: str | None = None
     interest_ids: Optional[List[int]] = None
+
+@app.get("/proposals/{proposal_id}/messages", response_model=List[MessageResponse])
+async def get_proposal_messages(
+    proposal_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+
+    if not proposal:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Propuesta no encontrada.")
+    
+    if current_user.id not in [proposal.proposer_user_id, proposal.owner_of_requested_product_id]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para ver estos mensajes.")
+
+    db.query(Message).filter(
+        Message.proposal_id == proposal_id,
+        Message.sender_id != current_user.id,
+        Message.is_read == False
+    ).update({"is_read": True})
+    db.commit()
+
+    messages = db.query(Message).filter(Message.proposal_id == proposal_id).order_by(Message.timestamp.asc()).all()
+    return messages
 
 @app.get("/categories", response_model=List[CategoryResponse])
 async def get_all_categories(db: Session = Depends(get_db)):
@@ -626,10 +654,11 @@ async def get_all_products_for_feed(db: Session = Depends(get_db)):
             location=product.location, is_active=product.is_active, views_count=product.views_count,
             created_at=product.created_at, updated_at=product.updated_at,
             category_name=product.category_obj.name if product.category_obj else "Sin categoría",
-            thumbnail_image_url=thumbnail_url,
+            thumbnail_image_url=thumbnail_url, 
             exchange_interests=[interest.name for interest in product.exchange_interests],
             images=[ProductImageResponse.from_orm(img) for img in product.images],
-            user_username=product.owner.full_name if product.owner else "Anónimo"
+            user_username=product.owner.full_name if product.owner else "Anónimo",
+            user_avatar_url=product.owner.profile_picture if product.owner else None
         ))
     return response_products
 
@@ -726,7 +755,6 @@ async def create_product(
         user_username=new_product.owner.full_name,
         category_name=new_product.category_obj.name,
         thumbnail_image_url=thumbnail_url,
-        is_for_sale=new_product.is_for_sale, # <-- LÍNEA CORREGIDA
         images=[ProductImageResponse.from_orm(img) for img in new_product.images],
         exchange_interests=[interest.name for interest in new_product.exchange_interests]
     )
@@ -784,8 +812,8 @@ async def get_my_proposals(
     proposals = db.query(Proposal).options(
         joinedload(Proposal.offered_product).joinedload(Product.images),
         joinedload(Proposal.requested_product).joinedload(Product.images),
-        joinedload(Proposal.proposer),
-        joinedload(Proposal.owner_of_requested_product),
+        joinedload(Proposal.proposer).joinedload(User.interests),
+        joinedload(Proposal.owner_of_requested_product).joinedload(User.interests),
         joinedload(Proposal.messages).joinedload(Message.sender_obj)
     ).filter(
         (Proposal.proposer_user_id == current_user.id) |
@@ -794,38 +822,63 @@ async def get_my_proposals(
 
     conversations_data = []
     for proposal in proposals:
-        other_user = proposal.owner_of_requested_product if proposal.proposer_user_id == current_user.id else proposal.proposer
-
+        other_user_obj = proposal.owner_of_requested_product if proposal.proposer_user_id == current_user.id else proposal.proposer
+        
         def get_product_public_response(product_obj):
             thumb_url = None
             if product_obj.images:
-                thumb = next((img for img in product_obj.images if img.is_thumbnail), product_obj.images[0])
-                thumb_url = thumb.image_url
-            return ProductPublicResponse(id=product_obj.id, title=product_obj.title, description=product_obj.description, thumbnail_image_url=thumb_url)
+                sorted_images = sorted(product_obj.images, key=lambda img: img.upload_order or float('inf'))
+                if sorted_images:
+                    thumb_url = sorted_images[0].image_url
+            return ProductPublicResponse(
+                id=product_obj.id, 
+                title=product_obj.title, 
+                description=product_obj.description, 
+                thumbnail_image_url=thumb_url,
+                user_id=product_obj.user_id
+            )
 
         offered_prod_response = get_product_public_response(proposal.offered_product)
         requested_prod_response = get_product_public_response(proposal.requested_product)
 
         unread_count = sum(1 for msg in proposal.messages if msg.sender_id != current_user.id and not msg.is_read)
         
-        last_message = MessageResponse.from_orm(proposal.messages[-1]) if proposal.messages else MessageResponse(
-            id=0, sender_id=proposal.proposer_user_id,
-            text=f"Propuesta de {proposal.offered_product.title} por {proposal.requested_product.title}",
-            timestamp=proposal.created_at, is_read=True
-        )
+        # Ordenar mensajes por timestamp para asegurar que el último es realmente el último
+        sorted_messages = sorted(proposal.messages, key=lambda m: m.timestamp)
+        if sorted_messages:
+            last_message_obj = sorted_messages[-1]
+            last_message_response = MessageResponse.from_orm(last_message_obj)
+        else:
+            last_message_response = MessageResponse(
+                id=0, sender_id=proposal.proposer_user_id,
+                text="Propuesta iniciada...",
+                timestamp=proposal.created_at, is_read=True
+            )
 
         exchange_details = ExchangeDetailsResponse(
-            id=proposal.id, offer=offered_prod_response, request=requested_prod_response,
-            date=proposal.created_at, status=proposal.status
+            id=proposal.id, 
+            offer=offered_prod_response, 
+            request=requested_prod_response,
+            created_at=proposal.created_at,  # <-- Usamos el nombre corregido
+            status=proposal.status
+        )
+        
+        user_public_response = UserPublicResponse(
+            id=other_user_obj.id,
+            full_name=other_user_obj.full_name,
+            email=other_user_obj.email,
+            avatar=other_user_obj.profile_picture
         )
 
+        all_messages_response = [MessageResponse.from_orm(msg) for msg in sorted_messages]
         conversations_data.append(ConversationResponse(
             exchange=exchange_details,
-            user=UserPublicResponse(id=other_user.id, full_name=other_user.full_name, email=other_user.email, avatar=f"https://i.pravatar.cc/150?img={other_user.id % 70}"),
-            messages=[MessageResponse.from_orm(msg) for msg in proposal.messages],
-            last_message=last_message,
+            user=user_public_response,
+            messages=all_messages_response,
+            last_message=last_message_response,
             unread_count=unread_count
         ))
+        
     return conversations_data
 
 @app.put("/proposals/{proposal_id}/status")
@@ -885,7 +938,6 @@ async def update_product(
     photo_order_ids: str = Form(''),
     deleted_photo_ids: str = Form(''),
     exchange_interest_ids: str = Form(''),
-    is_for_sale: bool = Form(...),
     new_photos: List[UploadFile] = File([])
 ):
     db_product = db.query(Product).options(
@@ -900,7 +952,6 @@ async def update_product(
     db_product.title = title
     db_product.description = description
     db_product.condition = condition
-    db_product.is_for_sale = is_for_sale
 
     category = db.query(Category).filter(Category.name == category_name).first()
     if not category:
