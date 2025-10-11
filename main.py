@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Query
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Query, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, date, timedelta
@@ -18,6 +18,7 @@ from fastapi.security import OAuth2PasswordBearer
 import aiofiles
 import uuid
 import json
+from sqlalchemy import or_, and_
 
 #Importaciones para la validacion de dni con PeruDevs
 import requests
@@ -48,6 +49,11 @@ product_exchange_interests_table = Table('product_exchange_interests', Base.meta
     Column('category_id', Integer, ForeignKey('categories.id', ondelete="CASCADE"), primary_key=True)
 )
 
+user_blocks = Table('user_blocks', Base.metadata,
+    Column('blocker_id', Integer, ForeignKey('users.id', ondelete="CASCADE"), primary_key=True),
+    Column('blocked_id', Integer, ForeignKey('users.id', ondelete="CASCADE"), primary_key=True)
+)
+
 # --- Modelos de la base de datos (SQLAlchemy) ---
 class User(Base):
     __tablename__ = "users"
@@ -65,15 +71,22 @@ class User(Base):
     bio = Column(Text, nullable=True)
     dni = Column(String(12), nullable=True, unique=True)
     credits = Column(Integer, default=10, nullable=False)
+    # He notado que usas 'user_interests_table' aquí, asegúrate de que esa sea 
+    # la variable correcta donde definiste la tabla de unión. 
+    # Si la llamaste 'user_interests' como en mi paso anterior, usa ese nombre.
     interests = relationship("Category", secondary=user_interests_table, back_populates="interested_users", lazy="joined")
     profile_picture = Column(String(500), nullable=True)
-
 
     products_owned = relationship("Product", back_populates="owner")
     proposals_made = relationship("Proposal", foreign_keys="[Proposal.proposer_user_id]", back_populates="proposer")
     proposals_received = relationship("Proposal", foreign_keys="[Proposal.owner_of_requested_product_id]", back_populates="owner_of_requested_product")
 
-
+    blocked_users = relationship("User", 
+                                 secondary=user_blocks, # <-- Asegúrate que esta tabla se llame 'user_blocks'
+                                 primaryjoin=(id == user_blocks.c.blocker_id),
+                                 secondaryjoin=(id == user_blocks.c.blocked_id),
+                                 backref="blocked_by_users")
+ 
 class Category(Base):
     __tablename__ = "categories"
     id = Column(Integer, primary_key=True, index=True)
@@ -87,6 +100,16 @@ class Category(Base):
     products_linked = relationship("Product", back_populates="category_obj")
     sought_by_products = relationship("Product", secondary=product_exchange_interests_table, back_populates="exchange_interests")
 
+class UserReport(Base):
+    __tablename__ = 'user_reports'
+    id = Column(Integer, primary_key=True, index=True)
+    reporter_id = Column(Integer, ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
+    reported_id = Column(Integer, ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
+    reason = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+    reporter = relationship("User", foreign_keys=[reporter_id])
+    reported = relationship("User", foreign_keys=[reported_id])
 
 class Product(Base):
     __tablename__ = "products"
@@ -164,6 +187,9 @@ class Proposal(Base):
     status = Column(String(50), default="pending", nullable=False) # e.g., 'pending', 'accepted', 'rejected', 'canceled'
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    deleted_by_proposer = Column(Boolean, default=False)
+    deleted_by_receiver = Column(Boolean, default=False)
 
     # Relaciones para acceder a los objetos completos
     offered_product = relationship("Product", foreign_keys=[offered_product_id], back_populates="proposals_offered")
@@ -422,6 +448,9 @@ class UserPublicResponse(BaseModel):
     id: int
     full_name: str
     email: EmailStr
+    bio: Optional[str] = None 
+    address: Optional[str] = None 
+    interests: List[CategoryResponse] = []
     avatar: Optional[str] = None # Campo para simular el avatar en el frontend
     class Config:
         from_attributes = True
@@ -461,6 +490,8 @@ class ProposalResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class ReportCreate(BaseModel):
+    reason: str
 
 # NUEVO: Pydantic model para un mensaje individual
 class MessageResponse(BaseModel):
@@ -868,6 +899,41 @@ async def get_user_products(user_id: int, db: Session = Depends(get_db), current
         ))
     return response_products
 
+@app.delete("/proposals/{proposal_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_proposal(
+    proposal_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Realiza un borrado lógico de la conversación para el usuario actual.
+    No elimina el registro, solo lo marca como borrado para uno de los participantes.
+    """
+    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+
+    if not proposal:
+        # No es necesario un error aquí, si no la encuentra, para el usuario es como si ya estuviera borrada.
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    # Identificar el rol del usuario actual en esta propuesta
+    if proposal.proposer_user_id == current_user.id:
+        # El usuario que borra es el que hizo la propuesta
+        proposal.deleted_by_proposer = True
+    elif proposal.owner_of_requested_product_id == current_user.id:
+        # El usuario que borra es el que recibió la propuesta
+        proposal.deleted_by_receiver = True
+    else:
+        # Si no es ninguno de los dos, no tiene permiso
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permiso para modificar esta conversación."
+        )
+    
+    db.commit() # Guarda el cambio (el flag de borrado)
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.get("/products_feed", response_model=List[ProductResponse])
 async def get_all_products_for_feed(db: Session = Depends(get_db)):
     products_db = db.query(Product).options(
@@ -1065,11 +1131,73 @@ async def create_proposal(
     ).filter(Proposal.id == new_proposal.id).first()
     return db_proposal
 
+@app.post("/users/{user_id_to_block}/block", status_code=status.HTTP_204_NO_CONTENT)
+async def block_user(
+    user_id_to_block: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if user_id_to_block == current_user.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No te puedes bloquear a ti mismo.")
+
+    user_to_block = db.query(User).filter(User.id == user_id_to_block).first()
+    if not user_to_block:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+
+    # Verificar si ya está bloqueado para no duplicar
+    if user_to_block not in current_user.blocked_users:
+        current_user.blocked_users.append(user_to_block)
+        db.commit()
+    
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/users/{user_id_to_report}/report", status_code=status.HTTP_201_CREATED)
+async def report_and_block_user(
+    user_id_to_report: int,
+    report_data: ReportCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if user_id_to_report == current_user.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No te puedes reportar a ti mismo.")
+
+    user_to_report = db.query(User).filter(User.id == user_id_to_report).first()
+    if not user_to_report:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+
+    # Crear el reporte
+    new_report = UserReport(
+        reporter_id=current_user.id,
+        reported_id=user_id_to_report,
+        reason=report_data.reason
+    )
+    db.add(new_report)
+
+    # Bloquear al usuario (si no está ya bloqueado)
+    if user_to_report not in current_user.blocked_users:
+        current_user.blocked_users.append(user_to_report)
+    
+    db.commit()
+    
+    return {"message": "Usuario reportado y bloqueado con éxito."}
+
 @app.get("/proposals/me", response_model=List[ConversationResponse])
 async def get_my_proposals(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    # --- INICIO DE LA MODIFICACIÓN ---
+
+    # 1. Obtener una lista de IDs de usuarios que el usuario actual ha bloqueado
+    #    y también los que lo han bloqueado a él.
+    blocked_user_ids = {user.id for user in current_user.blocked_users}
+    users_who_blocked_current_user = {user.id for user in current_user.blocked_by_users}
+    all_blocked_ids = blocked_user_ids.union(users_who_blocked_current_user)
+
+    # --- FIN DE LA MODIFICACIÓN ---
+
+    # 2. La consulta principal ahora excluye a los usuarios bloqueados
     proposals = db.query(Proposal).options(
         joinedload(Proposal.offered_product).joinedload(Product.images),
         joinedload(Proposal.requested_product).joinedload(Product.images),
@@ -1077,10 +1205,18 @@ async def get_my_proposals(
         joinedload(Proposal.owner_of_requested_product).joinedload(User.interests),
         joinedload(Proposal.messages).joinedload(Message.sender_obj)
     ).filter(
-        (Proposal.proposer_user_id == current_user.id) |
-        (Proposal.owner_of_requested_product_id == current_user.id)
+        or_(
+            and_(Proposal.proposer_user_id == current_user.id, Proposal.deleted_by_proposer == False),
+            and_(Proposal.owner_of_requested_product_id == current_user.id, Proposal.deleted_by_receiver == False)
+        ),
+        # --- INICIO DE LA MODIFICACIÓN ---
+        # 3. Añadir este filtro para excluir conversaciones con usuarios bloqueados
+        Proposal.proposer_user_id.notin_(all_blocked_ids),
+        Proposal.owner_of_requested_product_id.notin_(all_blocked_ids)
+        # --- FIN DE LA MODIFICACIÓN ---
     ).order_by(Proposal.updated_at.desc()).all()
 
+    # El resto del código de la función sigue exactamente igual...
     conversations_data = []
     for proposal in proposals:
         other_user_obj = proposal.owner_of_requested_product if proposal.proposer_user_id == current_user.id else proposal.proposer
@@ -1095,8 +1231,7 @@ async def get_my_proposals(
                 id=product_obj.id, 
                 title=product_obj.title, 
                 description=product_obj.description, 
-                thumbnail_image_url=thumb_url,
-                user_id=product_obj.user_id
+                thumbnail_image_url=thumb_url
             )
 
         offered_prod_response = get_product_public_response(proposal.offered_product)
@@ -1104,7 +1239,6 @@ async def get_my_proposals(
 
         unread_count = sum(1 for msg in proposal.messages if msg.sender_id != current_user.id and not msg.is_read)
         
-        # Ordenar mensajes por timestamp para asegurar que el último es realmente el último
         sorted_messages = sorted(proposal.messages, key=lambda m: m.timestamp)
         if sorted_messages:
             last_message_obj = sorted_messages[-1]
@@ -1120,7 +1254,7 @@ async def get_my_proposals(
             id=proposal.id, 
             offer=offered_prod_response, 
             request=requested_prod_response,
-            created_at=proposal.created_at,  # <-- Usamos el nombre corregido
+            created_at=proposal.created_at,
             status=proposal.status,
             proposer_user_id=proposal.proposer_user_id
         )
@@ -1129,7 +1263,10 @@ async def get_my_proposals(
             id=other_user_obj.id,
             full_name=other_user_obj.full_name,
             email=other_user_obj.email,
-            avatar=other_user_obj.profile_picture
+            avatar=other_user_obj.profile_picture,
+            bio=other_user_obj.bio, 
+            address=other_user_obj.address,
+            interests=other_user_obj.interests
         )
 
         all_messages_response = [MessageResponse.from_orm(msg) for msg in sorted_messages]
@@ -1210,6 +1347,31 @@ async def create_message(
     # 6. Devolver el mensaje creado como respuesta HTTP
     return MessageResponse.from_orm(new_message)
 
+@app.get("/users/me/blocked", response_model=List[UserPublicResponse])
+async def get_my_blocked_users(
+    current_user: User = Depends(get_current_user)
+):
+    # La relación 'blocked_users' que definimos en el modelo User nos da la lista directamente.
+    return current_user.blocked_users
+
+@app.delete("/users/{user_id_to_unblock}/block", status_code=status.HTTP_204_NO_CONTENT)
+async def unblock_user(
+    user_id_to_unblock: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    user_to_unblock = db.query(User).filter(User.id == user_id_to_unblock).first()
+
+    if not user_to_unblock:
+        # No hacemos nada si el usuario no existe, la acción es idempotente.
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    # Verificamos si el usuario está en la lista de bloqueados antes de intentar quitarlo
+    if user_to_unblock in current_user.blocked_users:
+        current_user.blocked_users.remove(user_to_unblock)
+        db.commit()
+    
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 @app.put("/products/{product_id}", response_model=ProductResponse)
 async def update_product(
