@@ -64,7 +64,7 @@ class User(Base):
     agreed_terms = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     phone = Column(String(50), nullable=True)
-    address = Column(String(255), nullable=True)
+    ubicacion = Column(String(255), nullable=True)
     date_of_birth = Column(Date, nullable=True)
     gender = Column(String(20), nullable=True)
     occupation = Column(String(100), nullable=True)
@@ -329,7 +329,7 @@ class UserResponse(BaseModel):
     agreed_terms: bool
     created_at: datetime
     phone: str | None = None
-    address: str | None = None
+    ubicacion: str | None = None
     date_of_birth: date | None = None
     gender: str | None = None
     occupation: str | None = None
@@ -449,7 +449,7 @@ class UserPublicResponse(BaseModel):
     full_name: str
     email: EmailStr
     bio: Optional[str] = None 
-    address: Optional[str] = None 
+    ubicacion: Optional[str] = None
     interests: List[CategoryResponse] = []
     avatar: Optional[str] = None # Campo para simular el avatar en el frontend
     class Config:
@@ -704,7 +704,7 @@ async def get_user_profile(user_id: int, db: Session = Depends(get_db), current_
     user_data = {
         "id": user.id, "full_name": user.full_name, "email": user.email,
         "agreed_terms": user.agreed_terms, "created_at": user.created_at, "phone": user.phone,
-        "address": user.address, "date_of_birth": user.date_of_birth, "gender": user.gender,
+        "ubicacion": user.ubicacion, "date_of_birth": user.date_of_birth, "gender": user.gender,
         "occupation": user.occupation, "bio": user.bio, "dni": user.dni,
         "profile_picture": user.profile_picture, "interests": [interest.name for interest in user.interests],
         "credits": user.credits
@@ -715,7 +715,7 @@ class UserUpdate(BaseModel):
     full_name: str | None = None
     email: EmailStr | None = None
     phone: str | None = None
-    address: str | None = None
+    ubicacion: str | None = None
     date_of_birth: date | None = None
     gender: str | None = None
     occupation: str | None = None
@@ -1275,7 +1275,7 @@ async def get_my_proposals(
             email=other_user_obj.email,
             avatar=other_user_obj.profile_picture,
             bio=other_user_obj.bio, 
-            address=other_user_obj.address,
+            ubicacion=other_user_obj.ubicacion,
             interests=other_user_obj.interests
         )
 
