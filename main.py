@@ -29,6 +29,10 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("La variable de entorno DATABASE_URL no está configurada. Crea un archivo .env con DATABASE_URL=postgresql://usuario:contraseña@host:puerto/nombre_bd")
 
+# Carga las variables del API de Perudevs para usarlas globalmente
+PERUDEVS_API_KEY = os.getenv("PERUDEVS_DNI_KEY")
+PERUDEVS_DNI_URL = os.getenv("PERUDEVS_DNI_URL")
+
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -197,7 +201,7 @@ def get_db():
     finally:
         db.close()
 
-def validate_dni_data(dni: str, full_name: str):
+def validate_dni_data(dni: str, full_name: str) -> dict:
     """Consulta el API de Perudevs para verificar que el DNI coincida con el nombre."""
     
     if not PERUDEVS_API_KEY:
@@ -486,11 +490,11 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
             detail="Las contraseñas no coinciden."
         )
 
-    # 2. Validación de DNI y Nombre con API externa
-    # Si la validación falla (no coincide o hay error), la función lanza una HTTPException.
-    validate_dni_data(dni=user.dni, full_name=user.full_name)
+    # 2. VALIDACIÓN DE DNI Y OBTENCIÓN DE DATOS COMPLETOS
+    # Llama a la función y obtiene los datos verificados del API
+    api_data = validate_dni_data(dni=user.dni, full_name=user.full_name) # <-- CAMBIO CLAVE
 
-    # 3. Verificación de existencia de DNI (añadida para mayor seguridad)
+    # 3. Verificación de existencia de DNI
     existing_dni_user = db.query(User).filter(User.dni == user.dni).first()
     if existing_dni_user:
         raise HTTPException(
@@ -506,15 +510,30 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
             detail="El correo electrónico ya está registrado."
         )
 
-    # 5. Creación de usuario
+    # 5. Creación de usuario (usando datos del API)
     hashed_password = get_password_hash(user.password)
+    
+    # --- PROCESAR DATOS OBTENIDOS DEL API COMPLETO ---
+    # La fecha viene como "DD/MM/YYYY". Necesitas convertirla a objeto date de Python.
+    try:
+        fecha_nacimiento_api = datetime.strptime(api_data['fecha_nacimiento'], '%d/%m/%Y').date()
+    except (KeyError, ValueError):
+        # Manejo de error si el campo falta o tiene un formato inesperado
+        fecha_nacimiento_api = None 
+        
+    # El API devuelve 'genero', tu modelo DB usa 'gender'
+    genero_api = api_data.get('genero') 
 
     db_user = User(
-        full_name=user.full_name,
+        # USAMOS EL NOMBRE COMPLETO VERIFICADO DEL API
+        full_name=api_data['nombre_completo'], 
         email=user.email,
         dni=user.dni,
         password_hash=hashed_password,
         agreed_terms=user.agreed_terms,
+        # GUARDAMOS LOS NUEVOS CAMPOS
+        date_of_birth=fecha_nacimiento_api,
+        gender=genero_api,
     )
     db.add(db_user)
     db.commit()
