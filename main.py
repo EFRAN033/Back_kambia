@@ -865,8 +865,8 @@ async def change_user_password(
 
 @app.get("/users/{user_id}/products", response_model=List[ProductResponse])
 async def get_user_products(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    if user_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para ver los productos de otros usuarios.")
+    # Se eliminó la validación 'if user_id != current_user.id:' para permitir la visualización.
+    # La dependencia 'current_user' se mantiene para asegurar que solo usuarios autenticados puedan acceder.
 
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -882,15 +882,25 @@ async def get_user_products(user_id: int, db: Session = Depends(get_db), current
     for product in products_db:
         thumbnail_url = None
         if product.images:
+            # Busca una imagen thumbnail o usa la primera si no hay ninguna.
             thumbnail_image = next((img for img in product.images if img.is_thumbnail), product.images[0])
             thumbnail_url = thumbnail_image.image_url
         
         response_products.append(ProductResponse(
-            id=product.id, user_id=product.user_id, category_id=product.category_id, title=product.title,
-            description=product.description, current_value_estimate=product.current_value_estimate,
-            condition=product.condition, status=product.status, preffered_exchange_items=product.preffered_exchange_items,
-            location=product.location, is_active=product.is_active, views_count=product.views_count,
-            created_at=product.created_at, updated_at=product.updated_at,
+            id=product.id,
+            user_id=product.user_id,
+            category_id=product.category_id,
+            title=product.title,
+            description=product.description,
+            current_value_estimate=product.current_value_estimate,
+            condition=product.condition,
+            status=product.status,
+            preffered_exchange_items=product.preffered_exchange_items,
+            location=product.location,
+            is_active=product.is_active,
+            views_count=product.views_count,
+            created_at=product.created_at,
+            updated_at=product.updated_at,
             category_name=product.category_obj.name if product.category_obj else "Sin categoría",
             thumbnail_image_url=thumbnail_url,
             images=[ProductImageResponse.from_orm(img) for img in product.images],
