@@ -621,7 +621,7 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
     user_data = {
         "id": db_user.id, "full_name": db_user.full_name, "email": db_user.email,
         "agreed_terms": db_user.agreed_terms, "created_at": db_user.created_at, "phone": db_user.phone,
-        "address": db_user.address, "date_of_birth": db_user.date_of_birth, "gender": db_user.gender,
+        "ubicacion": db_user.ubicacion,
         "occupation": db_user.occupation, "bio": db_user.bio, "dni": db_user.dni,
         "profile_picture": db_user.profile_picture, "credits": db_user.credits,
         "interests": [interest.name for interest in db_user.interests]
