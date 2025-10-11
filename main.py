@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, date, timedelta
@@ -7,17 +7,17 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, joinedload
 import os
 from dotenv import load_dotenv
-from typing import List, Optional
+from typing import List, Optional, Dict, Literal, Set # <-- LÍNEA CORREGIDA Y UNIFICADA
 from passlib.context import CryptContext
 from sqlalchemy import Table
 from sqlalchemy import func
 from fastapi import WebSocket, WebSocketDisconnect
-from typing import Dict, List
 # Importaciones para JWT
 from jose import JWTError, jwt
 from fastapi.security import OAuth2PasswordBearer
 import aiofiles
 import uuid
+import json
 
 #Importaciones para la validacion de dni con PeruDevs
 import requests
@@ -129,20 +129,28 @@ class ProductImage(Base):
 
 class ConnectionManager:
     def __init__(self):
-        # Un diccionario para mapear user_id -> WebSocket
-        self.active_connections: Dict[int, WebSocket] = {}
+        # user_id -> Set de WebSockets (permite múltiples pestañas)
+        self.active_connections: Dict[int, Set[WebSocket]] = {}
 
-    async def connect(self, user_id: int, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, user_id: int):
         await websocket.accept()
-        self.active_connections[user_id] = websocket
+        if user_id not in self.active_connections:
+            self.active_connections[user_id] = set()
+        self.active_connections[user_id].add(websocket)
+        print(f"Usuario {user_id} conectado.")
 
-    def disconnect(self, user_id: int):
-        if user_id in self.active_connections:
-            del self.active_connections[user_id]
+    def disconnect(self, websocket: WebSocket, user_id: int):
+        if user_id in self.active_connections and websocket in self.active_connections[user_id]:
+            self.active_connections[user_id].remove(websocket)
+            if not self.active_connections[user_id]:
+                del self.active_connections[user_id]
+        print(f"Usuario {user_id} desconectado.")
 
-    async def send_personal_message(self, message: dict, user_id: int):
+    async def send_personal_message(self, message: str, user_id: int):
         if user_id in self.active_connections:
-            await self.active_connections[user_id].send_json(message)
+            # Enviamos el mensaje a todas las conexiones activas del usuario
+            for connection in self.active_connections[user_id]:
+                await connection.send_text(message)
 
 manager = ConnectionManager()
 
@@ -481,6 +489,7 @@ class ExchangeDetailsResponse(BaseModel):
     request: ProductPublicResponse
     created_at: datetime  # <-- Cambio aplicado aquí
     status: str
+    proposer_user_id: int
 
     class Config:
         from_attributes = True
@@ -496,6 +505,22 @@ class ConversationResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+def get_current_user_from_token(token: str, db: Session) -> Optional[User]:
+    """
+    Decodifica un token JWT y devuelve el usuario si es válido.
+    Funciona para WebSockets donde Depends() no se puede usar directamente.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = payload.get("user_id")
+        if user_id is None:
+            return None
+        # Busca el usuario en la base de datos
+        user = db.query(User).filter(User.id == user_id).first()
+        return user
+    except JWTError:
+        return None
 
 
 @app.get("/")
@@ -589,6 +614,51 @@ async def login(user_login: UserLogin, db: Session = Depends(get_db)):
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
+@app.put("/proposals/{proposal_id}/status", response_model=ProposalResponse) # <-- ¡CAMBIO AQUÍ!
+async def update_proposal_status(
+    proposal_id: int,
+    status_update: ProposalStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Actualiza el estado de una propuesta.
+    - 'accepted' o 'rejected' solo puede ser ejecutado por el dueño del producto solicitado.
+    - 'cancelled' solo puede ser ejecutado por el usuario que hizo la propuesta (proposer).
+    """
+    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+
+    if not proposal:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Propuesta no encontrada.")
+
+    new_status = status_update.status
+    user_id = current_user.id
+
+    # Lógica de permisos para aceptar o rechazar
+    if new_status in ['accepted', 'rejected']:
+        # Solo el dueño del producto que se está pidiendo puede aceptar o rechazar
+        if user_id != proposal.owner_of_requested_product_id:
+            raise HTTPException(status_code=status.HTTP_4303_FORBIDDEN, detail="No tienes permiso para aceptar o rechazar esta propuesta.")
+        if proposal.status != 'pending':
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"No se puede {new_status} una propuesta que no está pendiente.")
+    
+    # Lógica de permisos para cancelar
+    elif new_status == 'cancelled':
+        # Solo el que hizo la oferta (proposer) puede cancelarla
+        if user_id != proposal.proposer_user_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No puedes cancelar una propuesta que no hiciste.")
+        if proposal.status != 'pending':
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se puede cancelar una propuesta que ya fue aceptada o rechazada.")
+    
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Estado no válido.")
+
+    # Si pasa los permisos, actualiza el estado
+    proposal.status = new_status
+    db.commit()
+    db.refresh(proposal)
+    
+    return proposal
 
 @app.get("/profile/{user_id}", response_model=UserResponse)
 async def get_user_profile(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -647,32 +717,56 @@ async def get_proposal_messages(
     return messages
 
 @app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: int):
-    await manager.connect(user_id, websocket)
+async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Query(...)):
+    # Obtenemos la sesión de la base de datos
+    db: Session = next(get_db())
     try:
-        while True:
-            # El servidor escucha aquí por eventos del cliente (como "escribiendo" o "leí un mensaje")
-            data = await websocket.receive_json()
-            event_type = data.get("type")
-            
-            # Ejemplo: Manejar evento de "escribiendo..."
-            if event_type == "typing":
-                recipient_id = data.get("recipient_id")
-                # Reenviar el evento de "escribiendo" al destinatario
-                await manager.send_personal_message({
-                    "type": "typing", 
-                    "is_typing": data.get("is_typing"),
-                    "sender_id": user_id
-                }, recipient_id)
+        # Verificamos el token para autenticar al usuario
+        current_user = get_current_user_from_token(token, db)
+        
+        # Si el token es inválido o no corresponde al user_id de la URL, rechazamos la conexión
+        if not current_user or current_user.id != user_id:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Token inválido o no autorizado.")
+            return
 
-            # Ejemplo: Manejar evento de "mensajes leídos"
-            elif event_type == "messages_read":
-                # Aquí iría tu lógica para actualizar la base de datos
-                # y luego notificar al otro usuario que sus mensajes fueron leídos.
-                pass
+        # Si el token es válido, aceptamos y manejamos la conexión
+        await manager.connect(websocket, user_id)
+        
+        try:
+            while True:
+                # La lógica para recibir y enviar mensajes se mantiene
+                data = await websocket.receive_json()
+                
+                recipient_id = data.get('recipient_id')
+                proposal_id = data.get('proposal_id')
+                text = data.get('text')
 
-    except WebSocketDisconnect:
-        manager.disconnect(user_id)
+                if recipient_id and proposal_id and text:
+                    # Guardamos el nuevo mensaje
+                    new_msg = Message(proposal_id=proposal_id, sender_id=user_id, text=text)
+                    db.add(new_msg)
+                    db.commit()
+                    db.refresh(new_msg)
+
+                    # Preparamos el mensaje para enviarlo
+                    message_to_send = {
+                        "type": "new_message",
+                        # Usamos .model_dump() de Pydantic para convertir el objeto a dict
+                        "data": MessageResponse.from_orm(new_msg).model_dump()
+                    }
+                    
+                    # Usamos json.dumps para enviar un string, que es más estándar
+                    await manager.send_personal_message(json.dumps(message_to_send, default=str), recipient_id)
+
+        except WebSocketDisconnect:
+            manager.disconnect(websocket, user_id) # Pasamos ambos argumentos
+        except Exception as e:
+            print(f"Error inesperado en WebSocket para usuario {user_id}: {e}")
+            manager.disconnect(websocket, user_id) # Pasamos ambos argumentos
+
+    finally:
+        # Cerramos la sesión de la base de datos al finalizar
+        db.close()
 
 @app.get("/categories", response_model=List[CategoryResponse])
 async def get_all_categories(db: Session = Depends(get_db)):
@@ -1027,7 +1121,8 @@ async def get_my_proposals(
             offer=offered_prod_response, 
             request=requested_prod_response,
             created_at=proposal.created_at,  # <-- Usamos el nombre corregido
-            status=proposal.status
+            status=proposal.status,
+            proposer_user_id=proposal.proposer_user_id
         )
         
         user_public_response = UserPublicResponse(
@@ -1047,29 +1142,6 @@ async def get_my_proposals(
         ))
         
     return conversations_data
-
-@app.put("/proposals/{proposal_id}/status")
-async def update_proposal_status(
-    proposal_id: int,
-    status: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
-    if not proposal:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Propuesta no encontrada.")
-    if proposal.owner_of_requested_product_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para modificar esta propuesta.")
-    if status not in ["accepted", "rejected"]:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Estado inválido.")
-    if proposal.status != "pending":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"La propuesta ya no está pendiente.")
-
-    proposal.status = status
-    proposal.updated_at = datetime.utcnow()
-    db.add(proposal)
-    db.commit()
-    return {"message": f"Propuesta actualizada a '{status}'."}
 
 class MessageCreate(BaseModel):
     proposal_id: int
