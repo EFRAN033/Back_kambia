@@ -11,7 +11,8 @@ from typing import List, Optional
 from passlib.context import CryptContext
 from sqlalchemy import Table
 from sqlalchemy import func
-
+from fastapi import WebSocket, WebSocketDisconnect
+from typing import Dict, List
 # Importaciones para JWT
 from jose import JWTError, jwt
 from fastapi.security import OAuth2PasswordBearer
@@ -126,6 +127,24 @@ class ProductImage(Base):
 
     product_obj = relationship("Product", back_populates="images")
 
+class ConnectionManager:
+    def __init__(self):
+        # Un diccionario para mapear user_id -> WebSocket
+        self.active_connections: Dict[int, WebSocket] = {}
+
+    async def connect(self, user_id: int, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections[user_id] = websocket
+
+    def disconnect(self, user_id: int):
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+
+    async def send_personal_message(self, message: dict, user_id: int):
+        if user_id in self.active_connections:
+            await self.active_connections[user_id].send_json(message)
+
+manager = ConnectionManager()
 
 class Proposal(Base):
     __tablename__ = "proposals"
@@ -201,12 +220,13 @@ def get_db():
     finally:
         db.close()
 
-def validate_dni_data(dni: str, full_name: str) -> dict:
-    """Consulta el API de Perudevs para verificar que el DNI coincida con el nombre."""
+def validate_dni_data(dni: str, full_name: str) -> dict: # <--- CAMBIO: Añadir el tipo de retorno 'dict'
+    """
+    Consulta el API de DNI Completo de Perudevs. 
+    Verifica que el DNI coincida con el nombre y devuelve los datos biográficos.
+    """
     
     if not PERUDEVS_API_KEY:
-        # En un entorno real, podrías registrar esto o simplemente fallar la validación.
-        # Por ahora, lanzamos un error claro.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="La clave de API de validación de DNI no está configurada en el servidor."
@@ -220,38 +240,36 @@ def validate_dni_data(dni: str, full_name: str) -> dict:
 
     try:
         response = requests.get(
-            PERUDEVS_DNI_URL,
+            PERUDEVS_DNI_URL, # Usará la URL de DNI Completo
             params={"document": dni, "key": PERUDEVS_API_KEY},
-            timeout=5 # Tiempo de espera máximo de 5 segundos
+            timeout=5
         )
-        response.raise_for_status() # Lanza error para códigos 4xx/5xx
+        response.raise_for_status()
 
         data = response.json()
 
         if not data.get("estado"):
-            # Mensaje genérico de no coincidencia o no encontrado
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=data.get("mensaje", "DNI no encontrado o no activo en el registro nacional.")
             )
 
-        # Normalizamos los nombres para la comparación
         resultado = data.get("resultado", {})
         nombre_api = resultado.get("nombre_completo", "").strip().upper()
         
-        # El nombre del usuario puede tener mayúsculas/minúsculas y espacios extra
         nombre_usuario_normalizado = " ".join(full_name.strip().upper().split())
         
-        # Lógica de validación: Comparamos el nombre completo de la API con el ingresado.
+        # Lógica de validación: Comparamos el nombre.
         if nombre_api != nombre_usuario_normalizado:
-            # Aquí la app es segura: si el nombre no coincide exactamente, rechazamos el registro.
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="El nombre completo no coincide con el número de DNI proporcionado."
+                detail="El nombre completo no coincide con el número de DNI proporcionado. Usa tu nombre legal."
             )
+        
+        # SI LA VALIDACIÓN ES EXITOSA, DEVUELVE LOS DATOS COMPLETOS
+        return resultado # <--- CAMBIO CLAVE: Devuelve el diccionario de resultados
 
     except requests.RequestException as e:
-        # Error de conexión o timeout
         print(f"Error al consultar API de Perudevs: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -294,6 +312,9 @@ class UserResponse(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+class ProposalStatusUpdate(BaseModel):
+    status: Literal['accepted', 'rejected', 'cancelled']
 
 class TokenData(BaseModel):
     email: Optional[str] = None
@@ -514,19 +535,20 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
     hashed_password = get_password_hash(user.password)
     
     # --- PROCESAR DATOS OBTENIDOS DEL API COMPLETO ---
-    # La fecha viene como "DD/MM/YYYY". Necesitas convertirla a objeto date de Python.
-    try:
-        fecha_nacimiento_api = datetime.strptime(api_data['fecha_nacimiento'], '%d/%m/%Y').date()
-    except (KeyError, ValueError):
-        # Manejo de error si el campo falta o tiene un formato inesperado
-        fecha_nacimiento_api = None 
+    # Convertir la fecha de nacimiento de la API ("DD/MM/YYYY") a objeto date de Python.
+    fecha_nacimiento_api = None
+    if 'fecha_nacimiento' in api_data:
+        try:
+            fecha_nacimiento_api = datetime.strptime(api_data['fecha_nacimiento'], '%d/%m/%Y').date()
+        except ValueError:
+            # Si el formato es incorrecto, lo dejamos como None
+            pass
         
-    # El API devuelve 'genero', tu modelo DB usa 'gender'
     genero_api = api_data.get('genero') 
-
+    
+    # Tomamos el nombre completo verificado, la fecha de nacimiento y el género del API
     db_user = User(
-        # USAMOS EL NOMBRE COMPLETO VERIFICADO DEL API
-        full_name=api_data['nombre_completo'], 
+        full_name=api_data['nombre_completo'], # USAMOS EL NOMBRE VERIFICADO
         email=user.email,
         dni=user.dni,
         password_hash=hashed_password,
@@ -623,6 +645,34 @@ async def get_proposal_messages(
 
     messages = db.query(Message).filter(Message.proposal_id == proposal_id).order_by(Message.timestamp.asc()).all()
     return messages
+
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: int):
+    await manager.connect(user_id, websocket)
+    try:
+        while True:
+            # El servidor escucha aquí por eventos del cliente (como "escribiendo" o "leí un mensaje")
+            data = await websocket.receive_json()
+            event_type = data.get("type")
+            
+            # Ejemplo: Manejar evento de "escribiendo..."
+            if event_type == "typing":
+                recipient_id = data.get("recipient_id")
+                # Reenviar el evento de "escribiendo" al destinatario
+                await manager.send_personal_message({
+                    "type": "typing", 
+                    "is_typing": data.get("is_typing"),
+                    "sender_id": user_id
+                }, recipient_id)
+
+            # Ejemplo: Manejar evento de "mensajes leídos"
+            elif event_type == "messages_read":
+                # Aquí iría tu lógica para actualizar la base de datos
+                # y luego notificar al otro usuario que sus mensajes fueron leídos.
+                pass
+
+    except WebSocketDisconnect:
+        manager.disconnect(user_id)
 
 @app.get("/categories", response_model=List[CategoryResponse])
 async def get_all_categories(db: Session = Depends(get_db)):
@@ -784,10 +834,24 @@ async def create_product(
     preffered_exchange_items: Optional[str] = Form(None),
     location: Optional[str] = Form(None),
     photos: List[UploadFile] = File(...),
-    exchange_interest_ids: Optional[str] = Form(None), # <-- ✨ CAMBIO 1: Recibimos un string
+    exchange_interest_ids: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    # --- ✨ 1. VERIFICACIÓN Y DESCUENTO DE CRÉDITOS ---
+    # Se comprueba si el usuario tiene créditos suficientes.
+    if current_user.credits is None or current_user.credits < 1:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes suficientes créditos para publicar."
+        )
+
+    # Si tiene créditos, se le descuenta uno.
+    current_user.credits -= 1
+    db.add(current_user) # Se añade el cambio a la sesión de la BD.
+    # --- FIN DE LA LÓGICA DE CRÉDITOS ---
+
+    # --- 2. VALIDACIONES DEL PRODUCTO ---
     if not all([title.strip(), description.strip(), category_name.strip(), condition.strip()]):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Los campos de título, descripción, categoría y condición son obligatorios.")
     if not photos:
@@ -795,66 +859,73 @@ async def create_product(
     if len(photos) > 4:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Solo se permiten un máximo de 4 imágenes.")
 
+    # --- 3. LÓGICA DE NEGOCIO (Categorías e Intereses) ---
     category = db.query(Category).filter(Category.name == category_name).first()
     if not category:
+        # Si la categoría no existe, se revierte el descuento de crédito para no penalizar al usuario.
+        db.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"La categoría '{category_name}' no existe.")
 
-    # ✨ CAMBIO 2: Convertimos el string a una lista de enteros
     interest_ids_list = []
     if exchange_interest_ids:
         try:
             interest_ids_list = [int(id_str) for id_str in exchange_interest_ids.split(',') if id_str]
         except ValueError:
+            db.rollback() # Revertir descuento de crédito si hay error
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Formato inválido para IDs de intereses.")
 
+    # --- 4. CREACIÓN DEL PRODUCTO Y GUARDADO DE IMÁGENES ---
     new_product = Product(
         user_id=current_user.id, category_id=category.id, title=title, description=description,
         current_value_estimate=current_value_estimate, condition=condition,
         preffered_exchange_items=preffered_exchange_items, location=location,
     )
     db.add(new_product)
-    db.flush() 
+    db.flush() # Se asigna un ID al producto antes de guardar las imágenes
 
     for i, photo in enumerate(photos):
         try:
-            image_url = await save_upload_file(photo)
+            # Asumo que 'save_upload_file' es una función que has creado para guardar archivos
+            image_url = await save_upload_file(photo) 
             db.add(ProductImage(product_id=new_product.id, image_url=image_url, is_thumbnail=(i == 0), upload_order=i + 1))
         except Exception:
-            db.rollback() 
+            db.rollback() # Si falla la subida de una imagen, se revierte todo
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error al subir la imagen {photo.filename}.")
 
-    # ✨ CAMBIO 3: Usamos la nueva lista 'interest_ids_list'
+    # --- 5. ASIGNACIÓN DE INTERESES Y COMMIT FINAL ---
     if interest_ids_list:
         interests_to_add = db.query(Category).filter(Category.id.in_(interest_ids_list)).all()
         if interests_to_add:
             new_product.exchange_interests = interests_to_add
 
     try:
+        # Se confirman todos los cambios en la base de datos:
+        # el descuento de crédito, el nuevo producto y sus imágenes e intereses.
         db.commit()
         db.refresh(new_product)
     except Exception as e:
-        db.rollback()
+        db.rollback() # Si el commit final falla, se revierte todo
         raise HTTPException(status_code=500, detail=f"Error al guardar el producto en la base de datos: {e}")
         
+    # --- 6. CONSTRUCCIÓN DE LA RESPUESTA ---
     thumbnail_url = None
     if new_product.images:
+        # Busca la imagen thumbnail o usa la primera si no hay ninguna marcada como tal.
         thumb = next((img for img in new_product.images if img.is_thumbnail), new_product.images[0])
         thumbnail_url = thumb.image_url
 
-    # Construimos la respuesta final manualmente para evitar errores
     return ProductResponse(
         id=new_product.id, user_id=new_product.user_id, category_id=new_product.category_id,
         title=new_product.title, description=new_product.description, current_value_estimate=new_product.current_value_estimate,
         condition=new_product.condition, status=new_product.status, preffered_exchange_items=new_product.preffered_exchange_items,
         location=new_product.location, is_active=new_product.is_active, views_count=new_product.views_count,
         created_at=new_product.created_at, updated_at=new_product.updated_at,
-        user_username=new_product.owner.full_name,
-        category_name=new_product.category_obj.name,
+        user_username=new_product.owner.full_name, # Asegúrate de que la relación se llama 'owner'
+        category_name=new_product.category_obj.name, # Asegúrate de que la relación se llama 'category_obj'
         thumbnail_image_url=thumbnail_url,
         images=[ProductImageResponse.from_orm(img) for img in new_product.images],
         exchange_interests=[interest.name for interest in new_product.exchange_interests]
     )
-
 
 @app.post("/proposals", response_model=ProposalResponse, status_code=status.HTTP_201_CREATED)
 async def create_proposal(
@@ -1010,17 +1081,63 @@ async def create_message(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    proposal = db.query(Proposal).filter(Proposal.id == message_data.proposal_id).first()
-    if not proposal or current_user.id not in [proposal.proposer_user_id, proposal.owner_of_requested_product_id]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para acceder a esta propuesta.")
+    # 1. Validación y obtención de la propuesta
+    proposal = db.query(Proposal).options(
+        joinedload(Proposal.owner_of_requested_product),
+        joinedload(Proposal.proposer)
+    ).filter(Proposal.id == message_data.proposal_id).first()
 
-    new_message = Message(proposal_id=message_data.proposal_id, sender_id=current_user.id, text=message_data.text)
+    if not proposal:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Propuesta no encontrada.")
+
+    # 2. Verificación de permisos
+    is_participant = current_user.id in [proposal.proposer_user_id, proposal.owner_of_requested_product_id]
+    if not is_participant:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para enviar mensajes en esta propuesta.")
+
+    # 3. Creación y guardado del mensaje en la base de datos
+    new_message = Message(
+        proposal_id=message_data.proposal_id,
+        sender_id=current_user.id,
+        text=message_data.text
+    )
     db.add(new_message)
+
+    # 4. Actualización de la fecha de la propuesta para ordenarla correctamente en el inbox
     proposal.updated_at = datetime.utcnow()
     db.add(proposal)
+
     db.commit()
     db.refresh(new_message)
+
+    # 5. Envío del mensaje en tiempo real vía WebSocket
+    # Determinar quién es el destinatario del mensaje
+    recipient_id = (
+        proposal.proposer_user_id 
+        if proposal.owner_of_requested_product_id == current_user.id 
+        else proposal.owner_of_requested_product_id
+    )
+
+    # Construir el payload del mensaje para el WebSocket
+    # Usamos .isoformat() para que el frontend (JavaScript) pueda interpretar la fecha correctamente
+    message_for_ws = {
+        "type": "new_message",
+        "data": {
+            "id": new_message.id,
+            "proposal_id": new_message.proposal_id,
+            "sender_id": new_message.sender_id,
+            "text": new_message.text,
+            "timestamp": new_message.timestamp.isoformat(),
+            "is_read": new_message.is_read
+        }
+    }
+    
+    # Enviar el mensaje al destinatario si está conectado
+    await manager.send_personal_message(message_for_ws, recipient_id)
+
+    # 6. Devolver el mensaje creado como respuesta HTTP
     return MessageResponse.from_orm(new_message)
+
 
 @app.put("/products/{product_id}", response_model=ProductResponse)
 async def update_product(
