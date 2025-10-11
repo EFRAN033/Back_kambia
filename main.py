@@ -721,7 +721,7 @@ class UserUpdate(BaseModel):
     occupation: str | None = None
     bio: str | None = None
     dni: str | None = None
-    interest_ids: Optional[List[int]] = None
+    interest_ids: Optional[List[int]] = []
 
 @app.get("/proposals/{proposal_id}/messages", response_model=List[MessageResponse])
 async def get_proposal_messages(
