@@ -1294,6 +1294,13 @@ class MessageCreate(BaseModel):
     proposal_id: int
     text: str
 
+from datetime import datetime
+from sqlalchemy.orm import joinedload
+from fastapi import Depends, HTTPException, status
+from fastapi.responses import JSONResponse
+
+# ... (otros imports y código de tu archivo)
+
 @app.post("/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
 async def create_message(
     message_data: MessageCreate,
@@ -1322,10 +1329,17 @@ async def create_message(
     )
     db.add(new_message)
 
-    # 4. Actualización de la fecha de la propuesta para ordenarla correctamente en el inbox
+    # 4. Actualización de la fecha y estado de la propuesta
     proposal.updated_at = datetime.utcnow()
-    db.add(proposal)
+    
+    # ===== INICIO DE LA CORRECCIÓN =====
+    # Al enviar un nuevo mensaje, "revivimos" la conversación para ambos usuarios,
+    # reseteando las banderas de borrado.
+    proposal.deleted_by_proposer = False
+    proposal.deleted_by_receiver = False
+    # ===== FIN DE LA CORRECCIÓN =====
 
+    db.add(proposal)
     db.commit()
     db.refresh(new_message)
 
@@ -1356,6 +1370,7 @@ async def create_message(
 
     # 6. Devolver el mensaje creado como respuesta HTTP
     return MessageResponse.from_orm(new_message)
+1
 
 @app.get("/users/me/blocked", response_model=List[UserPublicResponse])
 async def get_my_blocked_users(
