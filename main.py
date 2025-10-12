@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Query, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime, date, timedelta
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Date, Text, DECIMAL, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
@@ -455,6 +455,7 @@ class UserPublicResponse(BaseModel):
     avatar: Optional[str] = None # Campo para simular el avatar en el frontend
     class Config:
         from_attributes = True
+        populate_by_name = True
 
 # Esquema Pydantic para ProductBasicInfo (información básica del producto) - Renombrado/Ajustado a ProductPublicResponse
 class ProductPublicResponse(BaseModel): # Un modelo más ligero para productos en el feed/proposals
