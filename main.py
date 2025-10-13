@@ -372,7 +372,7 @@ class Token(BaseModel):
     token_type: str
 
 class ProposalStatusUpdate(BaseModel):
-    status: Literal['accepted', 'rejected', 'cancelled']
+    status: Literal['accepted', 'rejected', 'cancelled', 'completed']
 
 class TokenData(BaseModel):
     email: Optional[str] = None
