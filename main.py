@@ -66,6 +66,7 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     phone = Column(String(50), nullable=True)
     ubicacion = Column(String(255), nullable=True)
+    district_id = Column(String(50), nullable=True)
     date_of_birth = Column(Date, nullable=True)
     gender = Column(String(20), nullable=True)
     occupation = Column(String(100), nullable=True)
@@ -77,6 +78,9 @@ class User(Base):
     # Si la llamaste 'user_interests' como en mi paso anterior, usa ese nombre.
     interests = relationship("Category", secondary=user_interests_table, back_populates="interested_users", lazy="joined")
     profile_picture = Column(String(500), nullable=True)
+
+    ratings_given = relationship("UserRating", foreign_keys='UserRating.rater_id', back_populates="rater", cascade="all, delete-orphan")
+    ratings_received = relationship("UserRating", foreign_keys='UserRating.rated_id', back_populates="rated_user", cascade="all, delete-orphan")
 
     products_owned = relationship("Product", back_populates="owner")
     proposals_made = relationship("Proposal", foreign_keys="[Proposal.proposer_user_id]", back_populates="proposer")
@@ -215,6 +219,24 @@ class Message(Base):
     proposal = relationship("Proposal", back_populates="messages")
     sender_obj = relationship("User", foreign_keys=[sender_id], lazy="joined")
 
+class UserRatingBase(BaseModel):
+    score: int = Field(..., gt=0, le=5)
+    comment: Optional[str] = None
+
+class UserRatingCreate(UserRatingBase):
+    rated_id: int
+    proposal_id: int
+
+class UserRatingResponse(UserRatingBase):
+    id: int
+    rater_id: int
+    rated_id: int
+    proposal_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True # <-- CAMBIO DE orm_mode
+
 
 Base.metadata.create_all(bind=engine)
 
@@ -331,6 +353,7 @@ class UserResponse(BaseModel):
     created_at: datetime
     phone: str | None = None
     ubicacion: str | None = None
+    district_id: str | None = None
     date_of_birth: date | None = None
     gender: str | None = None
     occupation: str | None = None
@@ -359,6 +382,21 @@ class PasswordUpdate(BaseModel):
     current_password: str
     new_password: str
     confirm_new_password: str
+
+class UserRating(Base):
+    __tablename__ = 'user_ratings'
+    id = Column(Integer, primary_key=True, index=True)
+    rater_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    rated_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    proposal_id = Column(Integer, ForeignKey('proposals.id', ondelete='CASCADE'), nullable=False, unique=True)
+    score = Column(Integer, nullable=False)
+    comment = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+    rater = relationship("User", foreign_keys=[rater_id], back_populates="ratings_given")
+    rated_user = relationship("User", foreign_keys=[rated_id], back_populates="ratings_received")
+    proposal = relationship("Proposal")
+
 
 
 # --- Configuración JWT ---
@@ -453,9 +491,14 @@ class UserPublicResponse(BaseModel):
     ubicacion: Optional[str] = None
     interests: List[CategoryResponse] = []
     avatar: Optional[str] = None # Campo para simular el avatar en el frontend
+
+    rating_score: Optional[float] = 0.0
+    rating_count: int = 0
+
     class Config:
         from_attributes = True
         populate_by_name = True
+
 
 # Esquema Pydantic para ProductBasicInfo (información básica del producto) - Renombrado/Ajustado a ProductPublicResponse
 class ProductPublicResponse(BaseModel): # Un modelo más ligero para productos en el feed/proposals
@@ -647,6 +690,56 @@ async def login(user_login: UserLogin, db: Session = Depends(get_db)):
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
+@app.post("/ratings", response_model=UserRatingResponse, status_code=status.HTTP_201_CREATED) # <-- CAMBIO AQUÍ
+def create_rating(
+    rating: UserRatingCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # 1. Verificar que la propuesta exista y esté aceptada
+    proposal = db.query(Proposal).filter(
+        Proposal.id == rating.proposal_id,
+        Proposal.status == 'accepted'
+    ).first()
+
+    if not proposal:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Propuesta no encontrada o no ha sido aceptada.")
+
+    # 2. Verificar que el usuario actual sea parte de la propuesta y no sea el calificado
+    if not (proposal.proposer_user_id == current_user.id or proposal.owner_of_requested_product_id == current_user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No eres parte de esta propuesta.")
+    
+    if rating.rated_id == current_user.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No te puedes calificar a ti mismo.")
+
+    # 3. Verificar que el usuario calificado sea la contraparte en la propuesta
+    is_counterpart = (
+        (proposal.proposer_user_id == current_user.id and proposal.owner_of_requested_product_id == rating.rated_id) or
+        (proposal.owner_of_requested_product_id == current_user.id and proposal.proposer_user_id == rating.rated_id)
+    )
+    if not is_counterpart:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El usuario calificado no es la contraparte en esta propuesta.")
+
+    # 4. Verificar que no exista ya una calificación para esta propuesta por este usuario
+    existing_rating = db.query(UserRating).filter(
+        UserRating.proposal_id == rating.proposal_id,
+        UserRating.rater_id == current_user.id
+    ).first()
+
+    if existing_rating:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya has calificado esta transacción.")
+
+    # 5. Crear la valoración
+    db_rating = UserRating(
+        **rating.dict(),
+        rater_id=current_user.id
+    )
+    db.add(db_rating)
+    db.commit()
+    db.refresh(db_rating)
+    return db_rating
+
+
 @app.put("/proposals/{proposal_id}/status", response_model=ProposalResponse) # <-- ¡CAMBIO AQUÍ!
 async def update_proposal_status(
     proposal_id: int,
@@ -695,22 +788,38 @@ async def update_proposal_status(
 
 @app.get("/profile/{user_id}", response_model=UserResponse)
 async def get_user_profile(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Verifica que el usuario solo pueda ver su propio perfil.
     if user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para ver este perfil.")
     
+    # Carga el usuario y sus intereses de forma eficiente
     user = db.query(User).options(joinedload(User.interests)).filter(User.id == user_id).first()
     
+    # Si el usuario no existe, devuelve un error 404
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
 
+    # Construye el diccionario de respuesta, asegurándose de incluir todos los campos.
     user_data = {
-        "id": user.id, "full_name": user.full_name, "email": user.email,
-        "agreed_terms": user.agreed_terms, "created_at": user.created_at, "phone": user.phone,
-        "ubicacion": user.ubicacion, "date_of_birth": user.date_of_birth, "gender": user.gender,
-        "occupation": user.occupation, "bio": user.bio, "dni": user.dni,
-        "profile_picture": user.profile_picture, "interests": [interest.name for interest in user.interests],
-        "credits": user.credits
+        "id": user.id,
+        "full_name": user.full_name,
+        "email": user.email,
+        "agreed_terms": user.agreed_terms,
+        "created_at": user.created_at,
+        "phone": user.phone,
+        "ubicacion": user.ubicacion,
+        "district_id": user.district_id, # <- Campo clave que soluciona el problema
+        "date_of_birth": user.date_of_birth,
+        "gender": user.gender,
+        "occupation": user.occupation,
+        "bio": user.bio,
+        "dni": user.dni,
+        "credits": user.credits,
+        "interests": [interest.name for interest in user.interests],
+        "profile_picture": user.profile_picture
     }
+    
+    # Devuelve la respuesta usando el modelo Pydantic UserResponse
     return UserResponse(**user_data)
 
 class UserUpdate(BaseModel):
@@ -718,6 +827,7 @@ class UserUpdate(BaseModel):
     email: EmailStr | None = None
     phone: str | None = None
     ubicacion: str | None = None
+    district_id: str | None = None
     date_of_birth: date | None = None
     gender: str | None = None
     occupation: str | None = None
