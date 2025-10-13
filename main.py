@@ -363,6 +363,9 @@ class UserResponse(BaseModel):
     interests: List[str] = []
     profile_picture: str | None = None
 
+    rating_score: Optional[float] = 0.0
+    rating_count: int = 0
+
     class Config:
         from_attributes = True
 
@@ -388,7 +391,7 @@ class UserRating(Base):
     id = Column(Integer, primary_key=True, index=True)
     rater_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     rated_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
-    proposal_id = Column(Integer, ForeignKey('proposals.id', ondelete='CASCADE'), nullable=False, unique=True)
+    proposal_id = Column(Integer, ForeignKey('proposals.id', ondelete='CASCADE'), nullable=False)
     score = Column(Integer, nullable=False)
     comment = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
@@ -740,7 +743,7 @@ def create_rating(
     return db_rating
 
 
-@app.put("/proposals/{proposal_id}/status", response_model=ProposalResponse) # <-- ¡CAMBIO AQUÍ!
+@app.put("/proposals/{proposal_id}/status", response_model=ProposalResponse)
 async def update_proposal_status(
     proposal_id: int,
     status_update: ProposalStatusUpdate,
@@ -751,8 +754,14 @@ async def update_proposal_status(
     Actualiza el estado de una propuesta.
     - 'accepted' o 'rejected' solo puede ser ejecutado por el dueño del producto solicitado.
     - 'cancelled' solo puede ser ejecutado por el usuario que hizo la propuesta (proposer).
+    - 'completed' puede ser ejecutado por cualquiera de los dos participantes si la propuesta ya fue aceptada.
     """
-    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+    proposal = db.query(Proposal).options(
+        joinedload(Proposal.offered_product),
+        joinedload(Proposal.requested_product),
+        joinedload(Proposal.proposer),
+        joinedload(Proposal.owner_of_requested_product)
+    ).filter(Proposal.id == proposal_id).first()
 
     if not proposal:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Propuesta no encontrada.")
@@ -760,26 +769,37 @@ async def update_proposal_status(
     new_status = status_update.status
     user_id = current_user.id
 
+    # --- MEJORA: Validación de participante ---
+    is_participant = user_id in [proposal.proposer_user_id, proposal.owner_of_requested_product_id]
+    if not is_participant:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No eres parte de esta propuesta.")
+
     # Lógica de permisos para aceptar o rechazar
     if new_status in ['accepted', 'rejected']:
-        # Solo el dueño del producto que se está pidiendo puede aceptar o rechazar
         if user_id != proposal.owner_of_requested_product_id:
-            raise HTTPException(status_code=status.HTTP_4303_FORBIDDEN, detail="No tienes permiso para aceptar o rechazar esta propuesta.")
+            # El código de error 4303 no es estándar, se cambia a 403
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para aceptar o rechazar esta propuesta.")
         if proposal.status != 'pending':
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"No se puede {new_status} una propuesta que no está pendiente.")
     
     # Lógica de permisos para cancelar
     elif new_status == 'cancelled':
-        # Solo el que hizo la oferta (proposer) puede cancelarla
         if user_id != proposal.proposer_user_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No puedes cancelar una propuesta que no hiciste.")
         if proposal.status != 'pending':
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se puede cancelar una propuesta que ya fue aceptada o rechazada.")
+            
+    # --- NUEVA LÓGICA: Para completar la propuesta ---
+    elif new_status == 'completed':
+        # Cualquiera de los dos participantes puede marcarla como completada
+        if proposal.status != 'accepted':
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Solo se puede completar una propuesta que ha sido aceptada.")
     
     else:
+        # Si el estado no es ninguno de los anteriores, es inválido
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Estado no válido.")
 
-    # Si pasa los permisos, actualiza el estado
+    # Si pasa todas las validaciones, se actualiza el estado
     proposal.status = new_status
     db.commit()
     db.refresh(proposal)
@@ -792,12 +812,22 @@ async def get_user_profile(user_id: int, db: Session = Depends(get_db), current_
     if user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para ver este perfil.")
     
-    # Carga el usuario y sus intereses de forma eficiente
-    user = db.query(User).options(joinedload(User.interests)).filter(User.id == user_id).first()
+    # Carga el usuario y sus relaciones de intereses y valoraciones de forma eficiente
+    user = db.query(User).options(
+        joinedload(User.interests),
+        joinedload(User.ratings_received) # <-- Se añade la carga de valoraciones
+    ).filter(User.id == user_id).first()
     
     # Si el usuario no existe, devuelve un error 404
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+
+    # Lógica para calcular el rating
+    rating_count = len(user.ratings_received)
+    if rating_count > 0:
+        rating_score = sum(r.score for r in user.ratings_received) / rating_count
+    else:
+        rating_score = 0.0
 
     # Construye el diccionario de respuesta, asegurándose de incluir todos los campos.
     user_data = {
@@ -808,7 +838,7 @@ async def get_user_profile(user_id: int, db: Session = Depends(get_db), current_
         "created_at": user.created_at,
         "phone": user.phone,
         "ubicacion": user.ubicacion,
-        "district_id": user.district_id, # <- Campo clave que soluciona el problema
+        "district_id": user.district_id,
         "date_of_birth": user.date_of_birth,
         "gender": user.gender,
         "occupation": user.occupation,
@@ -816,7 +846,9 @@ async def get_user_profile(user_id: int, db: Session = Depends(get_db), current_
         "dni": user.dni,
         "credits": user.credits,
         "interests": [interest.name for interest in user.interests],
-        "profile_picture": user.profile_picture
+        "profile_picture": user.profile_picture,
+        "rating_score": rating_score,     # <-- Campo añadido
+        "rating_count": rating_count      # <-- Campo añadido
     }
     
     # Devuelve la respuesta usando el modelo Pydantic UserResponse
