@@ -485,7 +485,6 @@ class ProductResponse(BaseModel):
         from_attributes = True
 
 
-# Esquema Pydantic para UserBasicInfo (información básica del usuario) - Renombrado/Ajustado a UserPublicResponse
 class UserPublicResponse(BaseModel):
     id: int
     full_name: str
@@ -501,7 +500,6 @@ class UserPublicResponse(BaseModel):
     class Config:
         from_attributes = True
         populate_by_name = True
-
 
 # Esquema Pydantic para ProductBasicInfo (información básica del producto) - Renombrado/Ajustado a ProductPublicResponse
 class ProductPublicResponse(BaseModel): # Un modelo más ligero para productos en el feed/proposals
@@ -1053,6 +1051,40 @@ async def get_user_products(user_id: int, db: Session = Depends(get_db), current
         ))
     return response_products
 
+@app.get("/users/{user_id}/public-profile", response_model=UserPublicResponse)
+async def get_public_user_profile(user_id: int, db: Session = Depends(get_db)):
+    """
+    Obtiene el perfil público de un usuario, incluyendo su valoración.
+    Este endpoint es público y no requiere autenticación del solicitante.
+    """
+    user = db.query(User).options(
+        joinedload(User.interests),
+        joinedload(User.ratings_received)
+    ).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+
+    # Lógica para calcular el rating (la misma que usas en el perfil privado)
+    rating_count = len(user.ratings_received)
+    if rating_count > 0:
+        rating_score = sum(r.score for r in user.ratings_received) / rating_count
+    else:
+        rating_score = 0.0
+
+    # Construye la respuesta usando el modelo Pydantic UserPublicResponse
+    return UserPublicResponse(
+        id=user.id,
+        full_name=user.full_name,
+        email=user.email,
+        bio=user.bio,
+        ubicacion=user.ubicacion,
+        interests=[CategoryResponse.from_orm(interest) for interest in user.interests],
+        avatar=user.profile_picture,
+        rating_score=rating_score,
+        rating_count=rating_count
+    )
+
 @app.delete("/proposals/{proposal_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_proposal(
     proposal_id: int,
@@ -1341,15 +1373,11 @@ async def get_my_proposals(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # --- INICIO DE LA MODIFICACIÓN ---
-
     # 1. Obtener una lista de IDs de usuarios que el usuario actual ha bloqueado
     #    y también los que lo han bloqueado a él.
     blocked_user_ids = {user.id for user in current_user.blocked_users}
     users_who_blocked_current_user = {user.id for user in current_user.blocked_by_users}
     all_blocked_ids = blocked_user_ids.union(users_who_blocked_current_user)
-
-    # --- FIN DE LA MODIFICACIÓN ---
 
     # 2. La consulta principal ahora excluye a los usuarios bloqueados
     proposals = db.query(Proposal).options(
@@ -1363,14 +1391,11 @@ async def get_my_proposals(
             and_(Proposal.proposer_user_id == current_user.id, Proposal.deleted_by_proposer == False),
             and_(Proposal.owner_of_requested_product_id == current_user.id, Proposal.deleted_by_receiver == False)
         ),
-        # --- INICIO DE LA MODIFICACIÓN ---
         # 3. Añadir este filtro para excluir conversaciones con usuarios bloqueados
         Proposal.proposer_user_id.notin_(all_blocked_ids),
         Proposal.owner_of_requested_product_id.notin_(all_blocked_ids)
-        # --- FIN DE LA MODIFICACIÓN ---
     ).order_by(Proposal.updated_at.desc()).all()
 
-    # El resto del código de la función sigue exactamente igual...
     conversations_data = []
     for proposal in proposals:
         other_user_obj = proposal.owner_of_requested_product if proposal.proposer_user_id == current_user.id else proposal.proposer
@@ -1413,6 +1438,17 @@ async def get_my_proposals(
             proposer_user_id=proposal.proposer_user_id
         )
         
+        # --- INICIO DE LA CORRECCIÓN ---
+        # Cargar explícitamente las valoraciones recibidas por el otro usuario
+        db.refresh(other_user_obj, ['ratings_received'])
+
+        other_user_rating_count = len(other_user_obj.ratings_received)
+        if other_user_rating_count > 0:
+            other_user_rating_score = sum(r.score for r in other_user_obj.ratings_received) / other_user_rating_count
+        else:
+            # Aseguramos que la variable siempre exista
+            other_user_rating_score = 0.0
+        
         user_public_response = UserPublicResponse(
             id=other_user_obj.id,
             full_name=other_user_obj.full_name,
@@ -1420,8 +1456,12 @@ async def get_my_proposals(
             avatar=other_user_obj.profile_picture,
             bio=other_user_obj.bio, 
             ubicacion=other_user_obj.ubicacion,
-            interests=other_user_obj.interests
+            interests=[CategoryResponse.from_orm(interest) for interest in other_user_obj.interests],
+            # Añadimos los campos calculados
+            rating_score=other_user_rating_score,
+            rating_count=other_user_rating_count
         )
+        # --- FIN DE LA CORRECCIÓN ---
 
         all_messages_response = [MessageResponse.from_orm(msg) for msg in sorted_messages]
         conversations_data.append(ConversationResponse(
