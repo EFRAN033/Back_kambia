@@ -1184,7 +1184,16 @@ async def create_product(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # --- ✨ 1. VERIFICACIÓN Y DESCUENTO DE CRÉDITOS ---
+    # --- ✨ 1. VALIDACIÓN DE PERFIL COMPLETO (MODIFICACIÓN AÑADIDA) ---
+    # Se comprueba si el usuario tiene teléfono y ubicación/distrito.
+    if not current_user.phone or not current_user.ubicacion or not current_user.district_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Debes completar tu información de perfil (teléfono y ubicación) antes de poder publicar un producto."
+        )
+    # --- FIN DE LA VALIDACIÓN DE PERFIL ---
+
+    # --- 2. VERIFICACIÓN Y DESCUENTO DE CRÉDITOS ---
     # Se comprueba si el usuario tiene créditos suficientes.
     if current_user.credits is None or current_user.credits < 1:
         raise HTTPException(
@@ -1197,7 +1206,7 @@ async def create_product(
     db.add(current_user) # Se añade el cambio a la sesión de la BD.
     # --- FIN DE LA LÓGICA DE CRÉDITOS ---
 
-    # --- 2. VALIDACIONES DEL PRODUCTO ---
+    # --- 3. VALIDACIONES DEL PRODUCTO ---
     if not all([title.strip(), description.strip(), category_name.strip(), condition.strip()]):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Los campos de título, descripción, categoría y condición son obligatorios.")
     if not photos:
@@ -1205,7 +1214,7 @@ async def create_product(
     if len(photos) > 4:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Solo se permiten un máximo de 4 imágenes.")
 
-    # --- 3. LÓGICA DE NEGOCIO (Categorías e Intereses) ---
+    # --- 4. LÓGICA DE NEGOCIO (Categorías e Intereses) ---
     category = db.query(Category).filter(Category.name == category_name).first()
     if not category:
         # Si la categoría no existe, se revierte el descuento de crédito para no penalizar al usuario.
@@ -1220,7 +1229,7 @@ async def create_product(
             db.rollback() # Revertir descuento de crédito si hay error
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Formato inválido para IDs de intereses.")
 
-    # --- 4. CREACIÓN DEL PRODUCTO Y GUARDADO DE IMÁGENES ---
+    # --- 5. CREACIÓN DEL PRODUCTO Y GUARDADO DE IMÁGENES ---
     new_product = Product(
         user_id=current_user.id, category_id=category.id, title=title, description=description,
         current_value_estimate=current_value_estimate, condition=condition,
@@ -1238,7 +1247,7 @@ async def create_product(
             db.rollback() # Si falla la subida de una imagen, se revierte todo
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error al subir la imagen {photo.filename}.")
 
-    # --- 5. ASIGNACIÓN DE INTERESES Y COMMIT FINAL ---
+    # --- 6. ASIGNACIÓN DE INTERESES Y COMMIT FINAL ---
     if interest_ids_list:
         interests_to_add = db.query(Category).filter(Category.id.in_(interest_ids_list)).all()
         if interests_to_add:
@@ -1253,7 +1262,7 @@ async def create_product(
         db.rollback() # Si el commit final falla, se revierte todo
         raise HTTPException(status_code=500, detail=f"Error al guardar el producto en la base de datos: {e}")
         
-    # --- 6. CONSTRUCCIÓN DE LA RESPUESTA ---
+    # --- 7. CONSTRUCCIÓN DE LA RESPUESTA ---
     thumbnail_url = None
     if new_product.images:
         # Busca la imagen thumbnail o usa la primera si no hay ninguna marcada como tal.
