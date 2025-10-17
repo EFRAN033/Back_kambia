@@ -602,7 +602,7 @@ def get_current_user_from_token(token: str, db: Session) -> Optional[User]:
 
 @app.get("/")
 async def root():
-    return {"message": "¡Bienvenido a la API de KambiaPe! ✅"}
+    return {"message": "¡Bienvenido a la API de KambiaPe! ✅"} 
 
 @app.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(user: UserCreate, db: Session = Depends(get_db)):
