@@ -279,6 +279,14 @@ class CreditPurchaseRequest(BaseModel):
     unit_price: float = Field(..., gt=0.0)
     title: str = "Compra de Créditos para KambiaPe"
 
+class PaymentRequest(BaseModel):
+    token: str
+    issuer_id: str
+    payment_method_id: str
+    transaction_amount: float
+    installments: int
+    payer: dict
+    description: str
 
 Base.metadata.create_all(bind=engine)
 
@@ -1949,5 +1957,88 @@ async def handle_mercadopago_webhook(request: Request, db: Session = Depends(get
             return Response(status_code=status.HTTP_200_OK)
             
     return Response(status_code=status.HTTP_200_OK)
+
+@app.post("/payment/process_payment", status_code=status.HTTP_201_CREATED)
+async def process_payment(
+    payment_data: PaymentRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Procesa un pago directamente usando la Checkout API de Mercado Pago.
+    """
+    try:
+        # 1. Prepara el cuerpo de la solicitud para la API de Mercado Pago
+        external_ref = f"user_{current_user.id}_credits_api_{uuid.uuid4()}"
+        payment_request_body = {
+            "transaction_amount": payment_data.transaction_amount,
+            "token": payment_data.token,
+            "description": payment_data.description,
+            "installments": payment_data.installments,
+            "payment_method_id": payment_data.payment_method_id,
+            "issuer_id": payment_data.issuer_id,
+            "payer": payment_data.payer,
+            "external_reference": external_ref,
+            "notification_url": "https://05bfc7afa60f.ngrok-free.app/webhooks/mercadopago" # Asegúrate que tu URL de webhook sea la correcta
+        }
+
+        # 2. Usa el SDK para crear el pago (¡esta es la llamada clave!)
+        payment_response = sdk.payment().create(payment_request_body)
+
+        if payment_response.get("status") != 201:
+            print("--- ERROR DE MERCADO PAGO ---")
+            print(payment_response)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=payment_response.get("response", {}).get("message", "Error al procesar el pago.")
+            )
+
+        payment_result = payment_response["response"]
+        payment_status = payment_result.get("status")
+        payment_id_mp = str(payment_result.get("id"))
+
+        # 3. Guarda la transacción en tu base de datos
+        new_transaction = Transaction(
+            user_id=current_user.id,
+            mp_payment_id=payment_id_mp,
+            external_reference=external_ref,
+            status=payment_status,
+            description=payment_data.description,
+            amount=payment_data.transaction_amount,
+            currency_id='PEN',
+            payment_method_id=payment_data.payment_method_id
+        )
+        db.add(new_transaction)
+        
+        # 4. Si el pago es aprobado, acredita los créditos INMEDIATAMENTE
+        if payment_status == 'approved':
+            try:
+                # Extraemos la cantidad de créditos desde la descripción
+                parts = payment_data.description.split(' ')
+                credits_to_add = int(parts[2]) # Asumiendo formato "Compra de 10 Créditos..."
+                current_user.credits += credits_to_add
+                db.add(current_user)
+                print(f"¡ÉXITO! Se añadieron {credits_to_add} créditos al usuario {current_user.id}.")
+            except (IndexError, ValueError) as e:
+                print(f"ADVERTENCIA: Pago {payment_id_mp} aprobado, pero no se pudieron acreditar créditos automáticamente: {e}")
+        
+        db.commit()
+
+        # 5. Devuelve el resultado al frontend para que muestre el mensaje final
+        return {
+            "status": payment_status,
+            "detail": payment_result.get("status_detail", "Pago procesado."),
+            "id": payment_id_mp
+        }
+
+    except Exception as e:
+        db.rollback()
+        if isinstance(e, HTTPException):
+            raise e
+        print(f"Error inesperado al procesar el pago: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno del servidor: {e}"
+        )
     
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
