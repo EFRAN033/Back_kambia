@@ -469,13 +469,30 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+def get_token_from_cookie(request: Request):
+    token = request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No se encontraron credenciales de autenticación"
+        )
+    # El token en la cookie tiene el formato "Bearer <token>", lo separamos
+    scheme, _, param = token.partition(" ")
+    if scheme.lower() != "bearer" or not param:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Formato de token inválido"
+        )
+    return param
+
+async def get_current_user(token: str = Depends(get_token_from_cookie), db: Session = Depends(get_db)): # <-- CAMBIO AQUÍ
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="No se pudieron validar las credenciales",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
+        # El resto de la función no necesita cambios
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
         user_id: int = payload.get("user_id")
@@ -488,7 +505,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     if user is None:
         raise credentials_exception
     return user
-
 
 class ProductImageResponse(BaseModel):
     id: int
@@ -648,7 +664,7 @@ def get_current_user_from_token(token: str, db: Session) -> Optional[User]:
         return user
     except JWTError:
         return None
-
+    
 
 @app.get("/")
 async def root():
@@ -725,7 +741,7 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
     return UserResponse(**user_data)
 
 @app.post("/login", response_model=Token)
-async def login(user_login: UserLogin, db: Session = Depends(get_db)):
+async def login(user_login: UserLogin, response: Response, db: Session = Depends(get_db)): # Añade response: Response
     db_user = db.query(User).filter(User.email == user_login.email).first()
 
     if not db_user or not verify_password(user_login.password, db_user.password_hash):
@@ -739,7 +755,17 @@ async def login(user_login: UserLogin, db: Session = Depends(get_db)):
         data={"sub": db_user.email, "user_id": db_user.id},
         expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    
+    # --- INICIO DEL CAMBIO ---
+    # En lugar de devolver el token, lo establecemos en una cookie
+    response.set_cookie(
+        key="access_token",
+        value=f"Bearer {access_token}",
+        httponly=True,  # Impide el acceso desde JavaScript
+        samesite="lax", # O 'strict' para mayor seguridad
+        secure=True # Solo enviar por HTTPS en producción
+    )
+    return {"message": "Login exitoso"}
 
 @app.post("/ratings", response_model=UserRatingResponse, status_code=status.HTTP_201_CREATED) # <-- CAMBIO AQUÍ
 def create_rating(
