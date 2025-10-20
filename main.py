@@ -1,13 +1,13 @@
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Query, Response, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator, computed_field
 from datetime import datetime, date, timedelta
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Date, Text, DECIMAL, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, joinedload
 import os
 from dotenv import load_dotenv
-from typing import List, Optional, Dict, Literal, Set # <-- LÍNEA CORREGIDA Y UNIFICADA
+from typing import List, Optional, Dict, Literal, Set, Any
 from passlib.context import CryptContext
 from sqlalchemy import Table
 from sqlalchemy import func
@@ -321,10 +321,12 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 def get_db():
+    print("\n--- [LOG] Intentando crear una sesión de base de datos ---")
     db = SessionLocal()
     try:
         yield db
     finally:
+        print("--- [LOG] Cerrando la sesión de la base de datos ---")
         db.close()
 
 def validate_dni_data(dni: str, full_name: str) -> dict: # <--- CAMBIO: Añadir el tipo de retorno 'dict'
@@ -395,6 +397,8 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+# main.py - REEMPLAZA ESTE BLOQUE COMPLETO
+
 class UserResponse(BaseModel):
     id: int
     full_name: str
@@ -413,12 +417,38 @@ class UserResponse(BaseModel):
     interests: List[str] = []
     profile_picture: str | None = None
 
-    rating_score: Optional[float] = 0.0
-    rating_count: int = 0
+    # El validador para 'interests' se mantiene, es correcto.
+    @field_validator("interests", mode='before')
+    @classmethod
+    def transform_interests(cls, v: Any) -> List[str]:
+        if isinstance(v, list) and all(hasattr(item, 'name') for item in v):
+            return [item.name for item in v]
+        return v
+
+    # ===== INICIO DE LA CORRECCIÓN CLAVE =====
+    # Campo calculado para 'rating_count'
+    @computed_field
+    @property
+    def rating_count(self) -> int:
+        # Pydantic nos da acceso al objeto SQLAlchemy a través de 'self'.
+        # La relación 'ratings_received' fue cargada en la dependencia get_current_user.
+        if hasattr(self, 'ratings_received'):
+            return len(self.ratings_received)
+        return 0
+
+    # Campo calculado para 'rating_score'
+    @computed_field
+    @property
+    def rating_score(self) -> float:
+        if hasattr(self, 'ratings_received') and self.ratings_received:
+            total_score = sum(r.score for r in self.ratings_received)
+            return round(total_score / len(self.ratings_received), 2)
+        return 0.0
+    # ===== FIN DE LA CORRECCIÓN CLAVE =====
 
     class Config:
         from_attributes = True
-
+        
 # --- Modelos Pydantic para JWT ---
 class Token(BaseModel):
     access_token: str
@@ -464,7 +494,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+    
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -485,25 +516,52 @@ def get_token_from_cookie(request: Request):
         )
     return param
 
-async def get_current_user(token: str = Depends(get_token_from_cookie), db: Session = Depends(get_db)): # <-- CAMBIO AQUÍ
+async def get_current_user(request: Request, db: Session = Depends(get_db)):
+    print("\n--- [LOG] INICIO: Dependencia get_current_user ---")
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="No se pudieron validar las credenciales",
+        detail="No se pudieron validar las credenciales (sesión expirada o inválida)",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    
+    token_from_cookie = request.cookies.get("access_token")
+    if not token_from_cookie:
+        print("--- [LOG] ERROR: No se encontró la cookie 'access_token'.")
+        raise credentials_exception
+    
+    print("--- [LOG] Cookie 'access_token' encontrada.")
+    
+    scheme, _, token = token_from_cookie.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        print("--- [LOG] ERROR: Formato de token en cookie inválido.")
+        raise credentials_exception
+
     try:
-        # El resto de la función no necesita cambios
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
         user_id: int = payload.get("user_id")
-        if email is None or user_id is None:
+        if user_id is None:
+            print("--- [LOG] ERROR: El payload del token no contiene 'user_id'.")
             raise credentials_exception
-        token_data = TokenData(email=email, user_id=user_id)
-    except JWTError:
+        print(f"--- [LOG] Token decodificado exitosamente. User ID: {user_id}")
+    except JWTError as e:
+        print(f"--- [LOG] ERROR: JWTError al decodificar el token - {e}")
         raise credentials_exception
-    user = db.query(User).filter(User.id == token_data.user_id).first()
+    
+    # ===== INICIO DE LA CORRECCIÓN CLAVE =====
+    # Usamos joinedload para cargar las relaciones (interests y ratings) en la misma consulta.
+    # Esto evita el error de "instancia desvinculada".
+    user = db.query(User).options(
+        joinedload(User.interests),
+        joinedload(User.ratings_received)
+    ).filter(User.id == user_id).first()
+    # ===== FIN DE LA CORRECCIÓN CLAVE =====
+
     if user is None:
+        print(f"--- [LOG] ERROR: No se encontró un usuario con el ID {user_id} en la BD.")
         raise credentials_exception
+    
+    print(f"--- [LOG] Usuario {user.email} y sus relaciones han sido cargados desde la BD.")
+    print("--- [LOG] FIN: Dependencia get_current_user ---")
     return user
 
 class ProductImageResponse(BaseModel):
@@ -742,9 +800,11 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/login")
 async def login(user_login: UserLogin, response: Response, db: Session = Depends(get_db)):
+    print("\n--- [LOG] INICIO: Endpoint /login ---")
     db_user = db.query(User).filter(User.email == user_login.email).first()
 
     if not db_user or not verify_password(user_login.password, db_user.password_hash):
+        print("--- [LOG] ERROR: Credenciales incorrectas.")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Credenciales incorrectas: Correo o contraseña inválidos."
@@ -756,15 +816,17 @@ async def login(user_login: UserLogin, response: Response, db: Session = Depends
         expires_delta=access_token_expires
     )
     
+    print(f"--- [LOG] Token de acceso creado para el usuario: {db_user.email}")
+    
     response.set_cookie(
         key="access_token",
         value=f"Bearer {access_token}",
         httponly=True,
         samesite="lax",
-        # CAMBIO CLAVE: Poner en False para que funcione en http://localhost
         secure=False 
     )
-    # Se devuelve un mensaje simple en lugar de un token
+    print("--- [LOG] Cookie establecida en la respuesta.")
+    print("--- [LOG] FIN: Endpoint /login ---")
     return {"message": "Login exitoso"}
 
 @app.post("/ratings", response_model=UserRatingResponse, status_code=status.HTTP_201_CREATED) # <-- CAMBIO AQUÍ
@@ -2078,45 +2140,40 @@ async def logout(response: Response):
 
 @app.get("/profile/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """
-    Devuelve el perfil del usuario actualmente autenticado a través de la cookie de sesión.
-    """
-    # Para mantener la consistencia, reutilizamos la lógica de tu otro endpoint de perfil.
-    user = db.query(User).options(
-        joinedload(User.interests),
-        joinedload(User.ratings_received)
-    ).filter(User.id == current_user.id).first()
+    print("\n--- [LOG] INICIO: Endpoint /profile/me ---")
     
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+    # La dependencia get_current_user ya nos da el usuario, no necesitamos buscarlo de nuevo.
+    # Solo necesitamos recargar las relaciones si es necesario y calcular el rating.
+    
+    # Recargamos el objeto para asegurarnos de que las relaciones (ratings) estén actualizadas
+    db.refresh(current_user, ['ratings_received', 'interests'])
 
-    rating_count = len(user.ratings_received)
-    if rating_count > 0:
-        rating_score = sum(r.score for r in user.ratings_received) / rating_count
-    else:
-        rating_score = 0.0
+    rating_count = len(current_user.ratings_received)
+    rating_score = sum(r.score for r in current_user.ratings_received) / rating_count if rating_count > 0 else 0.0
 
     user_data = {
-        "id": user.id,
-        "full_name": user.full_name,
-        "email": user.email,
-        "agreed_terms": user.agreed_terms,
-        "created_at": user.created_at,
-        "phone": user.phone,
-        "ubicacion": user.ubicacion,
-        "district_id": user.district_id,
-        "date_of_birth": user.date_of_birth,
-        "gender": user.gender,
-        "occupation": user.occupation,
-        "bio": user.bio,
-        "dni": user.dni,
-        "credits": user.credits,
-        "interests": [interest.name for interest in user.interests],
-        "profile_picture": user.profile_picture,
+        "id": current_user.id,
+        "full_name": current_user.full_name,
+        "email": current_user.email,
+        "agreed_terms": current_user.agreed_terms,
+        "created_at": current_user.created_at,
+        "phone": current_user.phone,
+        "ubicacion": current_user.ubicacion,
+        "district_id": current_user.district_id,
+        "date_of_birth": current_user.date_of_birth,
+        "gender": current_user.gender,
+        "occupation": current_user.occupation,
+        "bio": current_user.bio,
+        "dni": current_user.dni,
+        "credits": current_user.credits,
+        "interests": [interest.name for interest in current_user.interests],
+        "profile_picture": current_user.profile_picture,
         "rating_score": rating_score,
         "rating_count": rating_count
     }
     
+    print("--- [LOG] Perfil de usuario preparado para la respuesta.")
+    print("--- [LOG] FIN: Endpoint /profile/me ---")
     return UserResponse(**user_data)
     
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
