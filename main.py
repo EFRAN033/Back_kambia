@@ -130,6 +130,29 @@ class UserReport(Base):
     reporter = relationship("User", foreign_keys=[reporter_id])
     reported = relationship("User", foreign_keys=[reported_id])
 
+class Transaction(Base):
+    __tablename__ = "transactions"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    
+    mp_payment_id = Column(String(255), unique=True, nullable=True, index=True)
+    mp_preference_id = Column(String(255), nullable=True)
+    external_reference = Column(String(255), nullable=True, index=True)
+    
+    status = Column(String(50), nullable=False, index=True)
+    description = Column(String(255), nullable=True)
+    currency_id = Column(String(3), nullable=False, default="PEN")
+    amount = Column(DECIMAL(10, 2), nullable=False)
+    
+    payment_method_id = Column(String(100), nullable=True)
+    payment_type_id = Column(String(100), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    user = relationship("User")
+
+
 class Product(Base):
     __tablename__ = "products"
     id = Column(Integer, primary_key=True, index=True)
@@ -1757,60 +1780,80 @@ from fastapi.staticfiles import StaticFiles
 @app.post("/payment/create_preference", status_code=status.HTTP_201_CREATED)
 async def create_preference(
     purchase_request: CreditPurchaseRequest,
+    db: Session = Depends(get_db), # <-- Añadimos la dependencia de la BD
     current_user: User = Depends(get_current_user)
 ):
     """
-    Crea una preferencia de pago en Mercado Pago para la compra de créditos.
+    Crea una preferencia de pago y registra la transacción inicial como pendiente.
     """
+    # Lista de precios oficial en el backend para seguridad
+    CREDIT_PACKAGES = {
+        2: 1.00,
+        5: 2.00,
+        10: 5.00
+    }
+    
+    # Validación del precio para evitar manipulaciones desde el frontend
+    expected_price = CREDIT_PACKAGES.get(purchase_request.quantity)
+    if not expected_price or expected_price != purchase_request.unit_price:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La cantidad o el precio de la compra no son válidos."
+        )
+        
     try:
-        # 1. Define los datos de la preferencia de pago
+        external_ref = f"user_{current_user.id}_credits_{purchase_request.quantity}_{uuid.uuid4()}"
+
         preference_data = {
             "items": [
                 {
                     "title": purchase_request.title,
-                    "quantity": purchase_request.quantity,
-                    "currency_id": "PEN",  # Moneda Local (Soles Peruanos)
-                    "unit_price": purchase_request.unit_price
+                    "quantity": 1, # La cantidad es 1 porque el precio es el total del paquete
+                    "currency_id": "PEN",
+                    "unit_price": expected_price # Usamos el precio validado
                 }
             ],
-            # 2. Información del pagador (el usuario actual)
             "payer": {
                 "name": current_user.full_name,
                 "email": current_user.email,
-                "identification": {
-                    "type": "DNI",
-                    "number": current_user.dni
-                }
+                "identification": { "type": "DNI", "number": current_user.dni }
             },
-            # 3. URLs de redirección después del pago
             "back_urls": {
-                # Reemplaza estas URLs con las rutas de tu frontend
-                "success": "http://localhost:5173/payment-success",
+                "success": "http://localhost:5173/payment-success", # URL a tu frontend
                 "failure": "http://localhost:5173/payment-failure",
                 "pending": "http://localhost:5173/payment-pending"
             },
-            "auto_return": "approved", # Redirige automáticamente solo si el pago es aprobado
-            
-            # 4. (OPCIONAL PERO RECOMENDADO) Un ID externo para identificar la compra en tu sistema
-            "external_reference": f"user_{current_user.id}_credits_{purchase_request.quantity}_{uuid.uuid4()}",
-
-            # 5. (MUY IMPORTANTE PARA PRODUCCIÓN) URL para recibir notificaciones (Webhooks)
-            # "notification_url": "https://tu-dominio.com/webhooks/mercadopago"
+            "auto_return": "approved",
+            "external_reference": external_ref,
+            "notification_url": "https://05bfc7afa60f.ngrok-free.app/webhooks/mercadopago"
         }
 
-        # 6. Usa el SDK para crear la preferencia
         preference_response = sdk.preference().create(preference_data)
         preference = preference_response["response"]
         
-        # 7. Devuelve el ID de la preferencia y el link de pago (init_point)
+        # --- INICIO DE LA MODIFICACIÓN ---
+        # Crea el registro en tu base de datos antes de enviar la respuesta
+        new_transaction = Transaction(
+            user_id=current_user.id,
+            mp_preference_id=preference["id"],
+            external_reference=external_ref,
+            status='pending',
+            description=purchase_request.title,
+            amount=expected_price,
+            currency_id='PEN'
+        )
+        db.add(new_transaction)
+        db.commit()
+        # --- FIN DE LA MODIFICACIÓN ---
+        
         return {"preference_id": preference["id"], "init_point": preference["init_point"]}
 
     except Exception as e:
-        # Manejo de errores
+        db.rollback() # Si algo falla, revierte la transacción de la BD
         print(f"Error al crear preferencia de Mercado Pago: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al comunicarse con el servicio de pago: {e}"
         )
-
+    
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
