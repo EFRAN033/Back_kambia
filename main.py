@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Query, Response
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Query, Response, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime, date, timedelta
@@ -1821,7 +1821,7 @@ async def create_preference(
                 "failure": "http://localhost:5173/payment-failure",
                 "pending": "http://localhost:5173/payment-pending"
             },
-            "auto_return": "approved",
+            # LA LÍNEA DE AUTO_RETURN FUE ELIMINADA
             "external_reference": external_ref,
             "notification_url": "https://05bfc7afa60f.ngrok-free.app/webhooks/mercadopago"
         }
@@ -1874,5 +1874,80 @@ async def create_preference(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error interno del servidor: {e}"
         )
+
+@app.post("/webhooks/mercadopago", status_code=status.HTTP_200_OK)
+async def handle_mercadopago_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Recibe, procesa y actúa sobre las notificaciones de pago de Mercado Pago.
+    """
+    body = await request.json()
+    print("--- WEBHOOK RECIBIDO ---")
+    print(body)
+    
+    # Mercado Pago a veces notifica sobre 'merchant_order' y otras sobre 'payment'
+    topic = body.get("topic") or body.get("type")
+    
+    if topic == "payment" or "payment" in body.get("resource", ""):
+        payment_id = body.get("data", {}).get("id")
+        if not payment_id:
+            # A veces el ID viene en otra parte, seamos flexibles
+            resource_url = body.get("resource")
+            if resource_url:
+                payment_id = resource_url.split('/')[-1]
+
+        if not payment_id:
+            print("Webhook: No se pudo encontrar el ID del pago en la notificación.")
+            return Response(status_code=status.HTTP_200_OK)
+
+        try:
+            print(f"Procesando payment_id: {payment_id}")
+            # 1. Obtener la información completa del pago desde Mercado Pago
+            payment_info_response = sdk.payment().get(payment_id)
+            payment_info = payment_info_response.get("response")
+
+            if not payment_info:
+                print(f"Webhook: No se pudo obtener información para el payment_id {payment_id}")
+                return Response(status_code=status.HTTP_200_OK)
+            
+            # 2. Buscar la transacción en nuestra base de datos por external_reference
+            external_ref = payment_info.get("external_reference")
+            db_transaction = db.query(Transaction).filter(Transaction.external_reference == external_ref).first()
+
+            if not db_transaction:
+                print(f"Webhook: No se encontró transacción para external_reference {external_ref}")
+                return Response(status_code=status.HTTP_200_OK)
+
+            # 3. Actualizar nuestra transacción solo si el estado ha cambiado
+            if db_transaction.status == payment_info["status"]:
+                print(f"Transacción {db_transaction.id} ya está en estado '{db_transaction.status}'. No se necesita actualización.")
+                return Response(status_code=status.HTTP_200_OK)
+
+            db_transaction.status = payment_info["status"]
+            db_transaction.mp_payment_id = payment_id
+            db_transaction.updated_at = datetime.utcnow()
+            
+            # 4. Lógica de negocio: Si el pago fue aprobado, ¡damos los créditos!
+            if db_transaction.status == 'approved':
+                user_to_credit = db.query(User).filter(User.id == db_transaction.user_id).first()
+                if user_to_credit:
+                    try:
+                        parts = external_ref.split('_')
+                        credits_to_add = int(parts[3])
+                        user_to_credit.credits += credits_to_add
+                        db.add(user_to_credit)
+                        print(f"¡ÉXITO! Se añadieron {credits_to_add} créditos al usuario {user_to_credit.id}. Nuevo saldo: {user_to_credit.credits}")
+                    except (IndexError, ValueError) as e:
+                        print(f"Error al parsear créditos desde external_reference '{external_ref}': {e}")
+            
+            db.commit()
+            print(f"Transacción {db_transaction.id} actualizada a estado '{db_transaction.status}'.")
+
+        except Exception as e:
+            db.rollback()
+            print(f"Error CRÍTICO procesando webhook de Mercado Pago: {e}")
+            # Aún así devolvemos 200 para que MP no siga reintentando un webhook que falla
+            return Response(status_code=status.HTTP_200_OK)
+            
+    return Response(status_code=status.HTTP_200_OK)
     
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
