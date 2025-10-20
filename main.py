@@ -2067,6 +2067,15 @@ async def process_payment(
             detail=f"Error interno del servidor: {e}"
         )
     
+
+@app.post("/logout")
+async def logout(response: Response):
+    """
+    Cierra la sesión del usuario eliminando la cookie de acceso.
+    """
+    response.delete_cookie("access_token")
+    return {"message": "Logout exitoso"}
+
 @app.get("/profile/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
