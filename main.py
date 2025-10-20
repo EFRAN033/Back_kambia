@@ -28,18 +28,31 @@ import re
 # --- Configuración de la base de datos ---
 load_dotenv()
 
+# 1. PRIMERO, defines la variable leyendo el archivo .env
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# 2. LUEGO, la usas para verificar si existe
 if not DATABASE_URL:
-    raise ValueError("La variable de entorno DATABASE_URL no está configurada. Crea un archivo .env con DATABASE_URL=postgresql://usuario:contraseña@host:puerto/nombre_bd")
+    raise ValueError("La variable de entorno DATABASE_URL no está configurada...")
 
 # Carga las variables del API de Perudevs para usarlas globalmente
 PERUDEVS_API_KEY = os.getenv("PERUDEVS_DNI_KEY")
 PERUDEVS_DNI_URL = os.getenv("PERUDEVS_DNI_URL")
 
+# Carga el Access Token de Mercado Pago
+MERCADOPAGO_ACCESS_TOKEN = os.getenv("MERCADOPAGO_ACCESS_TOKEN")
+if not MERCADOPAGO_ACCESS_TOKEN:
+    raise ValueError("La variable de entorno MERCADOPAGO_ACCESS_TOKEN no está configurada.")
+
+# Inicializa el SDK de Mercado Pago
+sdk = mercadopago.SDK(MERCADOPAGO_ACCESS_TOKEN)
+
+# Ahora creamos las instancias de la base de datos
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+# ... el resto de tu código
 
 user_interests_table = Table('user_interests', Base.metadata,
     Column('user_id', Integer, ForeignKey('users.id', ondelete="CASCADE"), primary_key=True),
@@ -237,6 +250,11 @@ class UserRatingResponse(UserRatingBase):
 
     class Config:
         from_attributes = True # <-- CAMBIO DE orm_mode
+
+class CreditPurchaseRequest(BaseModel):
+    quantity: int = Field(..., gt=0) # gt=0 asegura que sea un número positivo
+    unit_price: float = Field(..., gt=0.0)
+    title: str = "Compra de Créditos para KambiaPe"
 
 
 Base.metadata.create_all(bind=engine)
@@ -1735,5 +1753,64 @@ async def update_message_read_status(
     return {"message": f"{messages_updated_count} mensajes actualizados.", "updated_count": messages_updated_count}
 
 from fastapi.staticfiles import StaticFiles
+
+@app.post("/payment/create_preference", status_code=status.HTTP_201_CREATED)
+async def create_preference(
+    purchase_request: CreditPurchaseRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Crea una preferencia de pago en Mercado Pago para la compra de créditos.
+    """
+    try:
+        # 1. Define los datos de la preferencia de pago
+        preference_data = {
+            "items": [
+                {
+                    "title": purchase_request.title,
+                    "quantity": purchase_request.quantity,
+                    "currency_id": "PEN",  # Moneda Local (Soles Peruanos)
+                    "unit_price": purchase_request.unit_price
+                }
+            ],
+            # 2. Información del pagador (el usuario actual)
+            "payer": {
+                "name": current_user.full_name,
+                "email": current_user.email,
+                "identification": {
+                    "type": "DNI",
+                    "number": current_user.dni
+                }
+            },
+            # 3. URLs de redirección después del pago
+            "back_urls": {
+                # Reemplaza estas URLs con las rutas de tu frontend
+                "success": "http://localhost:5173/payment-success",
+                "failure": "http://localhost:5173/payment-failure",
+                "pending": "http://localhost:5173/payment-pending"
+            },
+            "auto_return": "approved", # Redirige automáticamente solo si el pago es aprobado
+            
+            # 4. (OPCIONAL PERO RECOMENDADO) Un ID externo para identificar la compra en tu sistema
+            "external_reference": f"user_{current_user.id}_credits_{purchase_request.quantity}_{uuid.uuid4()}",
+
+            # 5. (MUY IMPORTANTE PARA PRODUCCIÓN) URL para recibir notificaciones (Webhooks)
+            # "notification_url": "https://tu-dominio.com/webhooks/mercadopago"
+        }
+
+        # 6. Usa el SDK para crear la preferencia
+        preference_response = sdk.preference().create(preference_data)
+        preference = preference_response["response"]
+        
+        # 7. Devuelve el ID de la preferencia y el link de pago (init_point)
+        return {"preference_id": preference["id"], "init_point": preference["init_point"]}
+
+    except Exception as e:
+        # Manejo de errores
+        print(f"Error al crear preferencia de Mercado Pago: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al comunicarse con el servicio de pago: {e}"
+        )
 
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
