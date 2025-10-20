@@ -1780,20 +1780,18 @@ from fastapi.staticfiles import StaticFiles
 @app.post("/payment/create_preference", status_code=status.HTTP_201_CREATED)
 async def create_preference(
     purchase_request: CreditPurchaseRequest,
-    db: Session = Depends(get_db), # <-- Añadimos la dependencia de la BD
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
     Crea una preferencia de pago y registra la transacción inicial como pendiente.
     """
-    # Lista de precios oficial en el backend para seguridad
     CREDIT_PACKAGES = {
         2: 1.00,
         5: 2.00,
         10: 5.00
     }
     
-    # Validación del precio para evitar manipulaciones desde el frontend
     expected_price = CREDIT_PACKAGES.get(purchase_request.quantity)
     if not expected_price or expected_price != purchase_request.unit_price:
         raise HTTPException(
@@ -1808,9 +1806,9 @@ async def create_preference(
             "items": [
                 {
                     "title": purchase_request.title,
-                    "quantity": 1, # La cantidad es 1 porque el precio es el total del paquete
+                    "quantity": 1,
                     "currency_id": "PEN",
-                    "unit_price": expected_price # Usamos el precio validado
+                    "unit_price": expected_price
                 }
             ],
             "payer": {
@@ -1819,7 +1817,7 @@ async def create_preference(
                 "identification": { "type": "DNI", "number": current_user.dni }
             },
             "back_urls": {
-                "success": "http://localhost:5173/payment-success", # URL a tu frontend
+                "success": "http://localhost:5173/payment-success",
                 "failure": "http://localhost:5173/payment-failure",
                 "pending": "http://localhost:5173/payment-pending"
             },
@@ -1828,11 +1826,29 @@ async def create_preference(
             "notification_url": "https://05bfc7afa60f.ngrok-free.app/webhooks/mercadopago"
         }
 
+        # --- INICIO DE LA CORRECCIÓN ---
+        
+        # 6. Usa el SDK para crear la preferencia
         preference_response = sdk.preference().create(preference_data)
+        
+        # 7. VERIFICA LA RESPUESTA ANTES DE USARLA
+        # Si la respuesta no tiene un status 201 (creado), algo salió mal.
+        if preference_response.get("status") != 201:
+            # Imprimimos la respuesta completa para ver el error real
+            print("--- ERROR DE MERCADO PAGO ---")
+            print(preference_response)
+            print("-----------------------------")
+            # Lanzamos un error claro
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Error al crear la preferencia en Mercado Pago: {preference_response.get('response', {}).get('message', 'Error desconocido')}"
+            )
+
         preference = preference_response["response"]
         
-        # --- INICIO DE LA MODIFICACIÓN ---
-        # Crea el registro en tu base de datos antes de enviar la respuesta
+        # --- FIN DE LA CORRECCIÓN ---
+
+        # Crea el registro en tu base de datos
         new_transaction = Transaction(
             user_id=current_user.id,
             mp_preference_id=preference["id"],
@@ -1844,16 +1860,19 @@ async def create_preference(
         )
         db.add(new_transaction)
         db.commit()
-        # --- FIN DE LA MODIFICACIÓN ---
         
         return {"preference_id": preference["id"], "init_point": preference["init_point"]}
 
     except Exception as e:
-        db.rollback() # Si algo falla, revierte la transacción de la BD
-        print(f"Error al crear preferencia de Mercado Pago: {e}")
+        db.rollback()
+        # Si el error viene del HTTPException que lanzamos, lo pasamos directamente
+        if isinstance(e, HTTPException):
+            raise e
+        # Si es otro tipo de error, mantenemos el mensaje genérico
+        print(f"Error inesperado al crear preferencia: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al comunicarse con el servicio de pago: {e}"
+            detail=f"Error interno del servidor: {e}"
         )
     
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
