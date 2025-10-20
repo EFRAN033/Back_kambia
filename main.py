@@ -740,8 +740,8 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
     }
     return UserResponse(**user_data)
 
-@app.post("/login", response_model=Token)
-async def login(user_login: UserLogin, response: Response, db: Session = Depends(get_db)): # Añade response: Response
+@app.post("/login")
+async def login(user_login: UserLogin, response: Response, db: Session = Depends(get_db)):
     db_user = db.query(User).filter(User.email == user_login.email).first()
 
     if not db_user or not verify_password(user_login.password, db_user.password_hash):
@@ -756,15 +756,15 @@ async def login(user_login: UserLogin, response: Response, db: Session = Depends
         expires_delta=access_token_expires
     )
     
-    # --- INICIO DEL CAMBIO ---
-    # En lugar de devolver el token, lo establecemos en una cookie
     response.set_cookie(
         key="access_token",
         value=f"Bearer {access_token}",
-        httponly=True,  # Impide el acceso desde JavaScript
-        samesite="lax", # O 'strict' para mayor seguridad
-        secure=True # Solo enviar por HTTPS en producción
+        httponly=True,
+        samesite="lax",
+        # CAMBIO CLAVE: Poner en False para que funcione en http://localhost
+        secure=False 
     )
+    # Se devuelve un mensaje simple en lugar de un token
     return {"message": "Login exitoso"}
 
 @app.post("/ratings", response_model=UserRatingResponse, status_code=status.HTTP_201_CREATED) # <-- CAMBIO AQUÍ
@@ -2066,5 +2066,48 @@ async def process_payment(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error interno del servidor: {e}"
         )
+    
+@app.get("/profile/me", response_model=UserResponse)
+async def get_me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Devuelve el perfil del usuario actualmente autenticado a través de la cookie de sesión.
+    """
+    # Para mantener la consistencia, reutilizamos la lógica de tu otro endpoint de perfil.
+    user = db.query(User).options(
+        joinedload(User.interests),
+        joinedload(User.ratings_received)
+    ).filter(User.id == current_user.id).first()
+    
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+
+    rating_count = len(user.ratings_received)
+    if rating_count > 0:
+        rating_score = sum(r.score for r in user.ratings_received) / rating_count
+    else:
+        rating_score = 0.0
+
+    user_data = {
+        "id": user.id,
+        "full_name": user.full_name,
+        "email": user.email,
+        "agreed_terms": user.agreed_terms,
+        "created_at": user.created_at,
+        "phone": user.phone,
+        "ubicacion": user.ubicacion,
+        "district_id": user.district_id,
+        "date_of_birth": user.date_of_birth,
+        "gender": user.gender,
+        "occupation": user.occupation,
+        "bio": user.bio,
+        "dni": user.dni,
+        "credits": user.credits,
+        "interests": [interest.name for interest in user.interests],
+        "profile_picture": user.profile_picture,
+        "rating_score": rating_score,
+        "rating_count": rating_count
+    }
+    
+    return UserResponse(**user_data)
     
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
