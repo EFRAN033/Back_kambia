@@ -19,6 +19,7 @@ import aiofiles
 import uuid
 import json
 from sqlalchemy import or_, and_
+import mercadopago
 
 #Importaciones para la validacion de dni con PeruDevs
 import requests
