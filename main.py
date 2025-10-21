@@ -301,7 +301,9 @@ from fastapi.middleware.cors import CORSMiddleware
 # CONFIGURACIÓN DE CORS
 origins = [
     "http://localhost:5173",    # La dirección principal de Vite
-    "http://127.0.0.1:5173",  # A veces el navegador usa esta IP, es bueno tenerla
+    "http://127.0.0.1:5173",
+    "https://kambiape.com",
+    "http://kambiape.com",  # A veces el navegador usa esta IP, es bueno tenerla
 ]
 
 app.add_middleware(
@@ -1825,13 +1827,13 @@ async def create_preference(
                 "identification": { "type": "DNI", "number": current_user.dni }
             },
             "back_urls": {
-                "success": "http://localhost:5173/payment-success",
-                "failure": "http://localhost:5173/payment-failure",
-                "pending": "http://localhost:5173/payment-pending"
+                "success": "https://kambiape.com/payment-success",
+                "failure": "https://kambiape.com/payment-failure",
+                "pending": "https://kambiape.com/payment-pending"
             },
             # LA LÍNEA DE AUTO_RETURN FUE ELIMINADA
             "external_reference": external_ref,
-            "notification_url": "https://05bfc7afa60f.ngrok-free.app/webhooks/mercadopago"
+            "notification_url": "https://kambiape.com/api/webhooks/mercadopago"
         }
 
         # --- INICIO DE LA CORRECCIÓN ---
@@ -1979,7 +1981,7 @@ async def process_payment(
             "issuer_id": payment_data.issuer_id,
             "payer": payment_data.payer,
             "external_reference": external_ref,
-            "notification_url": "https://05bfc7afa60f.ngrok-free.app/webhooks/mercadopago" # Asegúrate que tu URL de webhook sea la correcta
+            "notification_url": "https://kambiape.com/api/webhooks/mercadopago" # Asegúrate que tu URL de webhook sea la correcta
         }
 
         # 2. Usa el SDK para crear el pago (¡esta es la llamada clave!)
