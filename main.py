@@ -20,6 +20,7 @@ import uuid
 import json
 from sqlalchemy import or_, and_
 import mercadopago
+from typing import List, Dict
 
 #Importaciones para la validacion de dni con PeruDevs
 import requests
@@ -316,6 +317,32 @@ app.add_middleware(
 )
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+class ConnectionManager:
+    def __init__(self):
+        # El diccionario guardará el ID del usuario y su objeto de conexión WebSocket
+        self.active_connections: Dict[int, WebSocket] = {}
+
+    async def connect(self, user_id: int, websocket: WebSocket):
+        """Acepta y almacena una nueva conexión."""
+        await websocket.accept()
+        self.active_connections[user_id] = websocket
+        print(f"Nuevo cliente conectado: {user_id}")
+
+    def disconnect(self, user_id: int):
+        """Elimina una conexión."""
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+            print(f"Cliente desconectado: {user_id}")
+
+    async def send_personal_message(self, message: str, user_id: int):
+        """Envía un mensaje a un usuario específico si está conectado."""
+        if user_id in self.active_connections:
+            websocket = self.active_connections[user_id]
+            await websocket.send_text(message)
+            print(f"Mensaje enviado a {user_id}: {message}")
+            
+manager = ConnectionManager()
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
@@ -973,6 +1000,59 @@ async def get_proposal_messages(
 
     messages = db.query(Message).filter(Message.proposal_id == proposal_id).order_by(Message.timestamp.asc()).all()
     return messages
+
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: int, db: Session = Depends(get_db)):
+    # Aquí podrías añadir una validación de token si lo pasas como query param
+    # Por ahora, confiamos en el user_id para simplificar
+    await manager.connect(user_id, websocket)
+    try:
+        while True:
+            # Espera a recibir un mensaje del cliente
+            data = await websocket.receive_text()
+            
+            # El frontend enviará los datos como un string JSON
+            message_data = json.loads(data)
+            
+            # Llama a la función que ya tienes para crear el mensaje en la BD
+            # Esto reutiliza tu lógica existente y asegura que todo se guarde igual
+            created_message = create_message(
+                MessageCreate(
+                    proposal_id=message_data['proposal_id'],
+                    text=message_data['text']
+                ),
+                db=db,
+                current_user=get_user_by_id(db, user_id) # Obtenemos el usuario
+            )
+
+            # Prepara la respuesta para enviarla a través del WebSocket
+            response_data = {
+                "type": "new_message",
+                "data": {
+                    "id": created_message.id,
+                    "proposal_id": created_message.proposal_id,
+                    "sender_id": created_message.sender_id,
+                    "text": created_message.text,
+                    "timestamp": created_message.timestamp.isoformat(),
+                    "is_read": created_message.is_read
+                }
+            }
+            
+            # Busca al destinatario para enviarle el mensaje
+            proposal = db.query(Proposal).filter(Proposal.id == message_data['proposal_id']).first()
+            if proposal:
+                recipient_id = proposal.requester_user_id if proposal.proposer_user_id == user_id else proposal.proposer_user_id
+                
+                # Envía el mensaje al destinatario si está conectado
+                await manager.send_personal_message(json.dumps(response_data), recipient_id)
+                # Envía una confirmación al emisor para que actualice su UI
+                await manager.send_personal_message(json.dumps(response_data), user_id)
+
+    except WebSocketDisconnect:
+        manager.disconnect(user_id)
+    except Exception as e:
+        print(f"Error en el WebSocket: {e}")
+        manager.disconnect(user_id)
 
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Query(...)):
