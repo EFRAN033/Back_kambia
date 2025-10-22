@@ -243,19 +243,20 @@ class Proposal(Base):
     messages = relationship("Message", back_populates="proposal", cascade="all, delete-orphan", order_by="Message.timestamp")
 
 
-# NUEVO: Modelo para los mensajes de chat
+# --- INICIO DE CAMBIO 1: Modelo Message ---
 class Message(Base):
     __tablename__ = "messages"
     id = Column(Integer, primary_key=True, index=True)
     proposal_id = Column(Integer, ForeignKey("proposals.id"), nullable=False)
-    sender_id = Column(Integer, ForeignKey("users.id"), nullable=False) # El usuario que envió el mensaje
-    text = Column(Text, nullable=False)
-    timestamp = Column(DateTime(timezone=True), default=datetime.utcnow) # Ajustado a timezone=True
-    is_read = Column(Boolean, default=False) # Indica si el receptor ha leído el mensaje
+    sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    text = Column(Text, nullable=True) # <-- MODIFICADO: Ahora puede ser nulo
+    image_url = Column(String(500), nullable=True) # <-- NUEVO: Para guardar la URL de la imagen
+    timestamp = Column(DateTime(timezone=True), default=datetime.utcnow)
+    is_read = Column(Boolean, default=False)
 
     proposal = relationship("Proposal", back_populates="messages")
     sender_obj = relationship("User", foreign_keys=[sender_id], lazy="joined")
-
+# --- FIN DE CAMBIO 1 ---
 class UserRatingBase(BaseModel):
     score: int = Field(..., gt=0, le=5)
     comment: Optional[str] = None
@@ -595,7 +596,8 @@ class ReportCreate(BaseModel):
 class MessageResponse(BaseModel):
     id: int
     sender_id: int
-    text: str
+    text: Optional[str] = None # <-- MODIFICADO: Ahora es opcional
+    image_url: Optional[str] = None # <-- NUEVO: Para enviar la URL en la respuesta
     timestamp: datetime
     is_read: bool
 
@@ -667,7 +669,7 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
 
     # 2. VALIDACIÓN DE DNI Y OBTENCIÓN DE DATOS COMPLETOS
     # Llama a la función y obtiene los datos verificados del API
-    api_data = validate_dni_data(dni=user.dni, full_name=user.full_name) # <-- CAMBIO CLAVE
+    api_data = validate_dni_data(dni=user.dni, full_name=user.full_name) 
 
     # 3. Verificación de existencia de DNI
     existing_dni_user = db.query(User).filter(User.dni == user.dni).first()
@@ -697,6 +699,27 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
         except ValueError:
             # Si el formato es incorrecto, lo dejamos como None
             pass
+    
+    # ===== INICIO DE LA MODIFICACIÓN: VERIFICACIÓN DE EDAD =====
+    if not fecha_nacimiento_api:
+        # Si el API de DNI no nos dio una fecha, no podemos verificar la edad.
+        # Por política de seguridad, rechazamos el registro.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No se pudo verificar tu fecha de nacimiento desde el DNI. No es posible completar el registro."
+        )
+
+    today = datetime.utcnow().date()
+    # Calculamos la fecha límite (exactamente 18 años atrás)
+    eighteen_years_ago = today.replace(year=today.year - 18)
+    
+    # Si la fecha de nacimiento es MÁS RECIENTE que la fecha límite, es menor de 18.
+    if fecha_nacimiento_api > eighteen_years_ago:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debes ser mayor de 18 años para registrarte en KambiaPe."
+        )
+    # ===== FIN DE LA MODIFICACIÓN =====
         
     genero_api = api_data.get('genero') 
     
@@ -714,17 +737,8 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)):
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
-    
-    # 6. Preparación de la respuesta
-    user_data = {
-        "id": db_user.id, "full_name": db_user.full_name, "email": db_user.email,
-        "agreed_terms": db_user.agreed_terms, "created_at": db_user.created_at, "phone": db_user.phone,
-        "ubicacion": db_user.ubicacion,
-        "occupation": db_user.occupation, "bio": db_user.bio, "dni": db_user.dni,
-        "profile_picture": db_user.profile_picture, "credits": db_user.credits,
-        "interests": [interest.name for interest in db_user.interests]
-    }
-    return UserResponse(**user_data)
+
+    return UserResponse.from_orm(db_user)
 
 @app.post("/login", response_model=Token)
 async def login(user_login: UserLogin, db: Session = Depends(get_db)):
@@ -801,10 +815,11 @@ async def update_proposal_status(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Actualiza el estado de una propuesta.
-    - 'accepted' o 'rejected' solo puede ser ejecutado por el dueño del producto solicitado.
-    - 'cancelled' solo puede ser ejecutado por el usuario que hizo la propuesta (proposer).
-    - 'completed' puede ser ejecutado por cualquiera de los dos participantes si la propuesta ya fue aceptada.
+    Actualiza el estado de una propuesta y el de los productos involucrados.
+    - 'accepted': Cambia los productos a 'pending_exchange'.
+    - 'rejected': No cambia el estado de los productos.
+    - 'cancelled': Devuelve los productos a 'available'.
+    - 'completed': Cambia los productos a 'exchanged'.
     """
     proposal = db.query(Proposal).options(
         joinedload(Proposal.offered_product),
@@ -819,7 +834,6 @@ async def update_proposal_status(
     new_status = status_update.status
     user_id = current_user.id
 
-    # --- MEJORA: Validación de participante ---
     is_participant = user_id in [proposal.proposer_user_id, proposal.owner_of_requested_product_id]
     if not is_participant:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No eres parte de esta propuesta.")
@@ -827,29 +841,48 @@ async def update_proposal_status(
     # Lógica de permisos para aceptar o rechazar
     if new_status in ['accepted', 'rejected']:
         if user_id != proposal.owner_of_requested_product_id:
-            # El código de error 4303 no es estándar, se cambia a 403
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para aceptar o rechazar esta propuesta.")
         if proposal.status != 'pending':
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"No se puede {new_status} una propuesta que no está pendiente.")
-    
+        
+        # --- LÓGICA DE ESTADO DE PRODUCTO ---
+        if new_status == 'accepted':
+            # Si se acepta, ambos productos pasan a estar "En Intercambio"
+            proposal.offered_product.status = 'pending_exchange'
+            proposal.requested_product.status = 'pending_exchange'
+            db.add(proposal.offered_product)
+            db.add(proposal.requested_product)
+
     # Lógica de permisos para cancelar
     elif new_status == 'cancelled':
         if user_id != proposal.proposer_user_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No puedes cancelar una propuesta que no hiciste.")
-        if proposal.status != 'pending':
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se puede cancelar una propuesta que ya fue aceptada o rechazada.")
-            
-    # --- NUEVA LÓGICA: Para completar la propuesta ---
+        if proposal.status not in ['pending', 'accepted']:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se puede cancelar esta propuesta.")
+        
+        # --- LÓGICA DE ESTADO DE PRODUCTO ---
+        # Si se cancela, ambos productos vuelven a estar "Disponibles"
+        proposal.offered_product.status = 'available'
+        proposal.requested_product.status = 'available'
+        db.add(proposal.offered_product)
+        db.add(proposal.requested_product)
+
+    # Lógica para completar la propuesta
     elif new_status == 'completed':
-        # Cualquiera de los dos participantes puede marcarla como completada
         if proposal.status != 'accepted':
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Solo se puede completar una propuesta que ha sido aceptada.")
-    
+        
+        # --- LÓGICA DE ESTADO DE PRODUCTO ---
+        # Si se completa, ambos productos se marcan como "Intercambiados"
+        proposal.offered_product.status = 'exchanged'
+        proposal.requested_product.status = 'exchanged'
+        db.add(proposal.offered_product)
+        db.add(proposal.requested_product)
+
     else:
-        # Si el estado no es ninguno de los anteriores, es inválido
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Estado no válido.")
 
-    # Si pasa todas las validaciones, se actualiza el estado
+    # Si pasa todas las validaciones, se actualiza el estado de la propuesta
     proposal.status = new_status
     db.commit()
     db.refresh(proposal)
@@ -1538,6 +1571,7 @@ async def get_my_proposals(
 class MessageCreate(BaseModel):
     proposal_id: int
     text: str
+    receiver_id: int #
 
 from datetime import datetime
 from sqlalchemy.orm import joinedload
@@ -1548,74 +1582,94 @@ from fastapi.responses import JSONResponse
 
 @app.post("/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
 async def create_message(
-    message_data: MessageCreate,
+    # Accept FormData: proposal_id, optional text, optional image
+    proposal_id: int = Form(...),
+    text: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # 1. Validación y obtención de la propuesta
+    # Validate that at least text or an image is provided
+    if not text and not image:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Se requiere un texto o una imagen para enviar el mensaje."
+        )
+
+    # 1. Fetch the proposal (same as before)
     proposal = db.query(Proposal).options(
         joinedload(Proposal.owner_of_requested_product),
         joinedload(Proposal.proposer)
-    ).filter(Proposal.id == message_data.proposal_id).first()
+    ).filter(Proposal.id == proposal_id).first()
 
     if not proposal:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Propuesta no encontrada.")
 
-    # 2. Verificación de permisos
+    # 2. Check permissions (same as before)
     is_participant = current_user.id in [proposal.proposer_user_id, proposal.owner_of_requested_product_id]
     if not is_participant:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para enviar mensajes en esta propuesta.")
 
-    # 3. Creación y guardado del mensaje en la base de datos
+    # 3. Process the image if it exists
+    saved_image_url: Optional[str] = None
+    if image:
+        allowed_content_types = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+        if image.content_type not in allowed_content_types:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Tipo de archivo no permitido ({image.content_type}). Solo se aceptan JPEG, PNG, GIF, WEBP."
+            )
+        try:
+            # Use your existing function to save the file
+            saved_image_url = await save_upload_file(image)
+        except Exception as e:
+            print(f"Error al guardar imagen del chat: {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo guardar la imagen.")
+
+    # 4. Create and save the message to the database
     new_message = Message(
-        proposal_id=message_data.proposal_id,
+        proposal_id=proposal_id,
         sender_id=current_user.id,
-        text=message_data.text
+        text=text, # Save text (can be None)
+        image_url=saved_image_url # Save image URL (can be None)
     )
     db.add(new_message)
 
-    # 4. Actualización de la fecha y estado de la propuesta
+    # 5. Update proposal timestamp and reset deletion flags (same as before)
     proposal.updated_at = datetime.utcnow()
-    
-    # ===== INICIO DE LA CORRECCIÓN =====
-    # Al enviar un nuevo mensaje, "revivimos" la conversación para ambos usuarios,
-    # reseteando las banderas de borrado.
     proposal.deleted_by_proposer = False
     proposal.deleted_by_receiver = False
-    # ===== FIN DE LA CORRECCIÓN =====
-
     db.add(proposal)
-    db.commit()
-    db.refresh(new_message)
 
-    # 5. Envío del mensaje en tiempo real vía WebSocket
-    # Determinar quién es el destinatario del mensaje
+    # Commit changes early to get the message ID and timestamp
+    try:
+        db.commit()
+        db.refresh(new_message)
+    except Exception as e:
+        db.rollback()
+        print(f"Error al guardar mensaje en BD: {e}")
+        raise HTTPException(status_code=500, detail="Error al guardar el mensaje.")
+
+    # 6. Send the real-time message via WebSocket
     recipient_id = (
-        proposal.proposer_user_id 
-        if proposal.owner_of_requested_product_id == current_user.id 
+        proposal.proposer_user_id
+        if proposal.owner_of_requested_product_id == current_user.id
         else proposal.owner_of_requested_product_id
     )
 
-    # Construir el payload del mensaje para el WebSocket
-    # Usamos .isoformat() para que el frontend (JavaScript) pueda interpretar la fecha correctamente
+    # Construct the payload using the updated MessageResponse Pydantic model
+    # (Ensure MessageResponse includes `image_url: Optional[str] = None`)
+    message_response_data = MessageResponse.from_orm(new_message).model_dump()
     message_for_ws = {
         "type": "new_message",
-        "data": {
-            "id": new_message.id,
-            "proposal_id": new_message.proposal_id,
-            "sender_id": new_message.sender_id,
-            "text": new_message.text,
-            "timestamp": new_message.timestamp.isoformat(),
-            "is_read": new_message.is_read
-        }
+        "data": message_response_data # This now includes image_url if present
     }
-    
-    # Enviar el mensaje al destinatario si está conectado
-    await manager.send_personal_message(message_for_ws, recipient_id)
 
-    # 6. Devolver el mensaje creado como respuesta HTTP
-    return MessageResponse.from_orm(new_message)
-1
+    # Send the message, using json.dumps with default=str for datetime handling
+    await manager.send_personal_message(json.dumps(message_for_ws, default=str), recipient_id)
+
+    # 7. Return the created message as the HTTP response
+    return new_message # FastAPI uses MessageResponse to serialize this
 
 @app.get("/users/me/blocked", response_model=List[UserPublicResponse])
 async def get_my_blocked_users(
