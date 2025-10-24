@@ -38,7 +38,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("La variable de entorno DATABASE_URL no está configurada...")
 
-broadcast = Broadcast("redis://redis:6379")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+broadcast = Broadcast(REDIS_URL)
+
 # Carga las variables del API de Perudevs para usarlas globalmente
 PERUDEVS_API_KEY = os.getenv("PERUDEVS_DNI_KEY")
 PERUDEVS_DNI_URL = os.getenv("PERUDEVS_DNI_URL")
@@ -266,7 +268,7 @@ class PaymentRequest(BaseModel):
     payer: dict
     description: str
 
-Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(bind=engine, checkfirst=True)
 
 app = FastAPI(
     title="KambiaPe API",
