@@ -193,33 +193,6 @@ class ProductImage(Base):
 
     product_obj = relationship("Product", back_populates="images")
 
-class ConnectionManager:
-    def __init__(self):
-        # user_id -> Set de WebSockets (permite múltiples pestañas)
-        self.active_connections: Dict[int, Set[WebSocket]] = {}
-
-    async def connect(self, websocket: WebSocket, user_id: int):
-        await websocket.accept()
-        if user_id not in self.active_connections:
-            self.active_connections[user_id] = set()
-        self.active_connections[user_id].add(websocket)
-        print(f"Usuario {user_id} conectado.")
-
-    def disconnect(self, websocket: WebSocket, user_id: int):
-        if user_id in self.active_connections and websocket in self.active_connections[user_id]:
-            self.active_connections[user_id].remove(websocket)
-            if not self.active_connections[user_id]:
-                del self.active_connections[user_id]
-        print(f"Usuario {user_id} desconectado.")
-
-    async def send_personal_message(self, message: str, user_id: int):
-        if user_id in self.active_connections:
-            # Enviamos el mensaje a todas las conexiones activas del usuario
-            for connection in self.active_connections[user_id]:
-                await connection.send_text(message)
-
-manager = ConnectionManager()
-
 class Proposal(Base):
     __tablename__ = "proposals"
     id = Column(Integer, primary_key=True, index=True)
@@ -320,28 +293,20 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 class ConnectionManager:
     def __init__(self):
-        # El diccionario guardará el ID del usuario y su objeto de conexión WebSocket
         self.active_connections: Dict[int, WebSocket] = {}
 
     async def connect(self, user_id: int, websocket: WebSocket):
-        """Acepta y almacena una nueva conexión."""
         await websocket.accept()
         self.active_connections[user_id] = websocket
-        print(f"Nuevo cliente conectado: {user_id}")
 
     def disconnect(self, user_id: int):
-        """Elimina una conexión."""
         if user_id in self.active_connections:
             del self.active_connections[user_id]
-            print(f"Cliente desconectado: {user_id}")
 
     async def send_personal_message(self, message: str, user_id: int):
-        """Envía un mensaje a un usuario específico si está conectado."""
         if user_id in self.active_connections:
-            websocket = self.active_connections[user_id]
-            await websocket.send_text(message)
-            print(f"Mensaje enviado a {user_id}: {message}")
-            
+            await self.active_connections[user_id].send_text(message)
+
 manager = ConnectionManager()
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -1001,110 +966,7 @@ async def get_proposal_messages(
     messages = db.query(Message).filter(Message.proposal_id == proposal_id).order_by(Message.timestamp.asc()).all()
     return messages
 
-@app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: int, db: Session = Depends(get_db)):
-    # Aquí podrías añadir una validación de token si lo pasas como query param
-    # Por ahora, confiamos en el user_id para simplificar
-    await manager.connect(user_id, websocket)
-    try:
-        while True:
-            # Espera a recibir un mensaje del cliente
-            data = await websocket.receive_text()
-            
-            # El frontend enviará los datos como un string JSON
-            message_data = json.loads(data)
-            
-            # Llama a la función que ya tienes para crear el mensaje en la BD
-            # Esto reutiliza tu lógica existente y asegura que todo se guarde igual
-            created_message = create_message(
-                MessageCreate(
-                    proposal_id=message_data['proposal_id'],
-                    text=message_data['text']
-                ),
-                db=db,
-                current_user=get_user_by_id(db, user_id) # Obtenemos el usuario
-            )
 
-            # Prepara la respuesta para enviarla a través del WebSocket
-            response_data = {
-                "type": "new_message",
-                "data": {
-                    "id": created_message.id,
-                    "proposal_id": created_message.proposal_id,
-                    "sender_id": created_message.sender_id,
-                    "text": created_message.text,
-                    "timestamp": created_message.timestamp.isoformat(),
-                    "is_read": created_message.is_read
-                }
-            }
-            
-            # Busca al destinatario para enviarle el mensaje
-            proposal = db.query(Proposal).filter(Proposal.id == message_data['proposal_id']).first()
-            if proposal:
-                recipient_id = proposal.requester_user_id if proposal.proposer_user_id == user_id else proposal.proposer_user_id
-                
-                # Envía el mensaje al destinatario si está conectado
-                await manager.send_personal_message(json.dumps(response_data), recipient_id)
-                # Envía una confirmación al emisor para que actualice su UI
-                await manager.send_personal_message(json.dumps(response_data), user_id)
-
-    except WebSocketDisconnect:
-        manager.disconnect(user_id)
-    except Exception as e:
-        print(f"Error en el WebSocket: {e}")
-        manager.disconnect(user_id)
-
-@app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: int, token: str = Query(...)):
-    # Obtenemos la sesión de la base de datos
-    db: Session = next(get_db())
-    try:
-        # Verificamos el token para autenticar al usuario
-        current_user = get_current_user_from_token(token, db)
-        
-        # Si el token es inválido o no corresponde al user_id de la URL, rechazamos la conexión
-        if not current_user or current_user.id != user_id:
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Token inválido o no autorizado.")
-            return
-
-        # Si el token es válido, aceptamos y manejamos la conexión
-        await manager.connect(websocket, user_id)
-        
-        try:
-            while True:
-                # La lógica para recibir y enviar mensajes se mantiene
-                data = await websocket.receive_json()
-                
-                recipient_id = data.get('recipient_id')
-                proposal_id = data.get('proposal_id')
-                text = data.get('text')
-
-                if recipient_id and proposal_id and text:
-                    # Guardamos el nuevo mensaje
-                    new_msg = Message(proposal_id=proposal_id, sender_id=user_id, text=text)
-                    db.add(new_msg)
-                    db.commit()
-                    db.refresh(new_msg)
-
-                    # Preparamos el mensaje para enviarlo
-                    message_to_send = {
-                        "type": "new_message",
-                        # Usamos .model_dump() de Pydantic para convertir el objeto a dict
-                        "data": MessageResponse.from_orm(new_msg).model_dump()
-                    }
-                    
-                    # Usamos json.dumps para enviar un string, que es más estándar
-                    await manager.send_personal_message(json.dumps(message_to_send, default=str), recipient_id)
-
-        except WebSocketDisconnect:
-            manager.disconnect(websocket, user_id) # Pasamos ambos argumentos
-        except Exception as e:
-            print(f"Error inesperado en WebSocket para usuario {user_id}: {e}")
-            manager.disconnect(websocket, user_id) # Pasamos ambos argumentos
-
-    finally:
-        # Cerramos la sesión de la base de datos al finalizar
-        db.close()
 
 @app.get("/categories", response_model=List[CategoryResponse])
 async def get_all_categories(db: Session = Depends(get_db)):
@@ -1292,7 +1154,7 @@ async def get_all_products_for_feed(db: Session = Depends(get_db)):
         joinedload(Product.images),
         joinedload(Product.owner),
         joinedload(Product.exchange_interests) # <-- ✨ CORRECCIÓN CLAVE
-    ).filter(Product.is_active == True, Product.status == 'available').all()
+    ).filter(Product.is_active == True, Product.status.in_(['available', 'pending_exchange'])).all()
 
     response_products = []
     for product in products_db:
@@ -2093,6 +1955,58 @@ async def handle_mercadopago_webhook(request: Request, db: Session = Depends(get
             return Response(status_code=status.HTTP_200_OK)
             
     return Response(status_code=status.HTTP_200_OK)
+
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: int, db: Session = Depends(get_db)):
+    await manager.connect(user_id, websocket)
+    current_user = db.query(User).filter(User.id == user_id).first()
+    if not current_user:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            message_data = json.loads(data)
+            
+            proposal_id = message_data.get('proposal_id')
+            proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+
+            if not proposal or (current_user.id not in [proposal.proposer_user_id, proposal.owner_of_requested_product_id]):
+                continue
+
+            db_message = Message(
+                proposal_id=proposal_id,
+                sender_id=current_user.id,
+                text=message_data['text'],
+                timestamp=datetime.utcnow()
+            )
+            db.add(db_message)
+            db.commit()
+            db.refresh(db_message)
+            
+            message_to_send = {
+                "id": db_message.id,
+                "proposal_id": db_message.proposal_id,
+                "sender_id": db_message.sender_id,
+                "text": db_message.text,
+                "timestamp": db_message.timestamp.isoformat(),
+                "is_read": db_message.is_read
+            }
+            
+            payload = json.dumps({"type": "new_message", "data": message_to_send})
+
+            recipient_id = proposal.owner_of_requested_product_id if current_user.id == proposal.proposer_user_id else proposal.proposer_user_id
+
+            # Enviar al destinatario y al remitente
+            await manager.send_personal_message(payload, recipient_id)
+            await manager.send_personal_message(payload, current_user.id)
+
+    except WebSocketDisconnect:
+        manager.disconnect(user_id)
+    except Exception as e:
+        print(f"Error en WebSocket para usuario {user_id}: {e}")
+        manager.disconnect(user_id)
 
 @app.post("/payment/process_payment", status_code=status.HTTP_201_CREATED)
 async def process_payment(
