@@ -2,6 +2,7 @@ aiofiles==24.1.0
 annotated-types==0.7.0
 anyio==4.9.0
 bcrypt==4.0.1
+broadcaster==0.3.1
 certifi==2025.10.5
 cffi==2.0.0
 charset-normalizer==3.4.3
@@ -42,6 +43,7 @@ python-jose==3.5.0
 python-multipart==0.0.20
 pytz==2025.2
 PyYAML==6.0.3
+redis==7.0.0
 requests==2.32.5
 rsa==4.9.1
 six==1.17.0

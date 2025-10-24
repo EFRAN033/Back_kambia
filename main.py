@@ -21,6 +21,8 @@ import json
 from sqlalchemy import or_, and_
 import mercadopago
 from typing import List, Dict
+import asyncio
+from broadcaster import Broadcast
 
 #Importaciones para la validacion de dni con PeruDevs
 import requests
@@ -36,6 +38,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("La variable de entorno DATABASE_URL no está configurada...")
 
+broadcast = Broadcast("redis://redis:6379")
 # Carga las variables del API de Perudevs para usarlas globalmente
 PERUDEVS_API_KEY = os.getenv("PERUDEVS_DNI_KEY")
 PERUDEVS_DNI_URL = os.getenv("PERUDEVS_DNI_URL")
@@ -1078,6 +1081,80 @@ async def get_user_products(user_id: int, db: Session = Depends(get_db), current
         ))
     return response_products
 
+@app.on_event("startup")
+async def startup_event():
+    await broadcast.connect()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await broadcast.disconnect()
+
+@app.websocket("/ws/{user_id}")
+async def websocket_endpoint(websocket: WebSocket, user_id: int, db: Session = Depends(get_db)):
+    await websocket.accept()
+    current_user = db.query(User).filter(User.id == user_id).first()
+    if not current_user:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # Creamos una tarea para escuchar mensajes entrantes y otra para enviar mensajes salientes
+    async def receive_messages():
+        try:
+            while True:
+                data = await websocket.receive_text()
+                message_data = json.loads(data)
+                
+                proposal_id = message_data.get('proposal_id')
+                proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+
+                if not proposal or (current_user.id not in [proposal.proposer_user_id, proposal.owner_of_requested_product_id]):
+                    continue
+
+                db_message = Message(
+                    proposal_id=proposal_id,
+                    sender_id=current_user.id,
+                    text=message_data['text'],
+                    timestamp=datetime.utcnow()
+                )
+                db.add(db_message)
+                db.commit()
+                db.refresh(db_message)
+                
+                message_to_send = {
+                    "id": db_message.id,
+                    "proposal_id": db_message.proposal_id,
+                    "sender_id": db_message.sender_id,
+                    "text": db_message.text,
+                    "timestamp": db_message.timestamp.isoformat(),
+                    "is_read": db_message.is_read
+                }
+                payload = json.dumps({"type": "new_message", "data": message_to_send})
+
+                recipient_id = proposal.owner_of_requested_product_id if current_user.id == proposal.proposer_user_id else proposal.proposer_user_id
+
+                # Publica el mensaje en el canal del destinatario y en el del remitente
+                await broadcast.publish(channel=f"user_{recipient_id}", message=payload)
+                await broadcast.publish(channel=f"user_{current_user.id}", message=payload)
+        except WebSocketDisconnect:
+            pass # El bucle de subscribe se encargará de la desconexión
+        except Exception as e:
+            print(f"Error en receive_messages para usuario {user_id}: {e}")
+
+    async def send_messages():
+        try:
+            async with broadcast.subscribe(channel=f"user_{user_id}") as subscriber:
+                async for event in subscriber:
+                    await websocket.send_text(event.message)
+        except Exception as e:
+            print(f"Error en send_messages para usuario {user_id}: {e}")
+
+    # Ejecuta ambas tareas concurrentemente
+    try:
+        await asyncio.gather(receive_messages(), send_messages())
+    except Exception as e:
+        print(f"WebSocket cerrado para el usuario {user_id}. Error: {e}")
+
+
 @app.get("/users/{user_id}/public-profile", response_model=UserPublicResponse)
 async def get_public_user_profile(user_id: int, db: Session = Depends(get_db)):
     """
@@ -2091,4 +2168,4 @@ async def process_payment(
             detail=f"Error interno del servidor: {e}"
         )
     
-app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
+#app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
