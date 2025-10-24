@@ -592,6 +592,7 @@ class ReportCreate(BaseModel):
 # NUEVO: Pydantic model para un mensaje individual
 class MessageResponse(BaseModel):
     id: int
+    proposal_id: int
     sender_id: int
     text: Optional[str] = None # <-- MODIFICADO: Ahora es opcional
     image_url: Optional[str] = None # <-- NUEVO: Para enviar la URL en la respuesta
@@ -1092,12 +1093,24 @@ async def shutdown_event():
     await broadcast.disconnect()
 
 @app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: int, db: Session = Depends(get_db)):
+async def websocket_endpoint(websocket: WebSocket, user_id: int):
+    # --- Gestión de sesión para la conexión inicial ---
+    # Ya no usamos Depends(get_db) aquí.
+    db = SessionLocal()
+    try:
+        current_user = db.query(User).filter(User.id == user_id).first()
+        if not current_user:
+            await websocket.accept() # Aceptar para enviar el código de cierre
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        
+        # Guardamos el ID del usuario verificado.
+        user_id_safe = current_user.id
+    finally:
+        db.close() # Cerramos esta sesión inicial
+    
     await websocket.accept()
-    current_user = db.query(User).filter(User.id == user_id).first()
-    if not current_user:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
+    # --- Fin de la gestión de sesión inicial ---
 
     # Creamos una tarea para escuchar mensajes entrantes y otra para enviar mensajes salientes
     async def receive_messages():
@@ -1105,57 +1118,96 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int, db: Session = D
             while True:
                 data = await websocket.receive_text()
                 message_data = json.loads(data)
-                
+
                 proposal_id = message_data.get('proposal_id')
-                proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
+                if not proposal_id:
+                    continue # Ignorar eventos sin proposal_id
 
-                if not proposal or (current_user.id not in [proposal.proposer_user_id, proposal.owner_of_requested_product_id]):
-                    continue
-
-                db_message = Message(
-                    proposal_id=proposal_id,
-                    sender_id=current_user.id,
-                    text=message_data['text'],
-                    timestamp=datetime.utcnow()
-                )
-                db.add(db_message)
-                db.commit()
-                db.refresh(db_message)
+                event_type = message_data.get('type')
                 
-                message_to_send = {
-                    "id": db_message.id,
-                    "proposal_id": db_message.proposal_id,
-                    "sender_id": db_message.sender_id,
-                    "text": db_message.text,
-                    "timestamp": db_message.timestamp.isoformat(),
-                    "is_read": db_message.is_read
-                }
-                payload = json.dumps({"type": "new_message", "data": message_to_send})
+                # ===================== INICIO DEL CAMBIO CLAVE =====================
+                # Creamos una sesión de BD CORTA para CADA mensaje/evento
+                db = SessionLocal()
+                try:
+                    # --- 1. Validar la propuesta y encontrar al destinatario ---
+                    proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
 
-                recipient_id = proposal.owner_of_requested_product_id if current_user.id == proposal.proposer_user_id else proposal.proposer_user_id
+                    # Verificar que el usuario actual pertenece a esta conversación
+                    if not proposal or (user_id_safe not in [proposal.proposer_user_id, proposal.owner_of_requested_product_id]):
+                        continue
 
-                # Publica el mensaje en el canal del destinatario y en el del remitente
-                await broadcast.publish(channel=f"user_{recipient_id}", message=payload)
-                await broadcast.publish(channel=f"user_{current_user.id}", message=payload)
+                    # Identificar al otro usuario (destinatario)
+                    recipient_id = proposal.owner_of_requested_product_id if user_id_safe == proposal.proposer_user_id else proposal.proposer_user_id
+                    
+                    # --- 2. Manejar el evento según su tipo ---
+                    
+                    if event_type == 'typing_start':
+                        # Este evento NO necesita la BD, solo retransmite
+                        payload = json.dumps({
+                            "type": "user_typing",
+                            "data": {"proposal_id": proposal_id, "user_id": user_id_safe}
+                        })
+                        await broadcast.publish(channel=f"user_{recipient_id}", message=payload)
+
+                    elif event_type == 'typing_stop':
+                        # Este evento NO necesita la BD, solo retransmite
+                        payload = json.dumps({
+                            "type": "user_stopped_typing",
+                            "data": {"proposal_id": proposal_id, "user_id": user_id_safe}
+                        })
+                        await broadcast.publish(channel=f"user_{recipient_id}", message=payload)
+
+                    elif event_type == 'new_message' or not event_type:
+                        text_content = message_data.get('text')
+                        if not text_content:
+                            continue # No guardar mensajes vacíos
+
+                        # --- 3. Guardar el nuevo mensaje en la BD (usando la sesión CORTA) ---
+                        db_message = Message(
+                            proposal_id=proposal_id,
+                            sender_id=user_id_safe,
+                            text=text_content,
+                            timestamp=datetime.utcnow()
+                        )
+                        db.add(db_message)
+                        db.commit()
+                        db.refresh(db_message)
+                        
+                        # --- 4. Preparar y enviar el mensaje real ---
+                        message_data_dict = MessageResponse.from_orm(db_message).model_dump()
+                        
+                        payload = json.dumps({
+                            "type": "new_message",
+                            "data": message_data_dict
+                        }, default=str)
+
+                        # Publica el mensaje en el canal del destinatario Y en el del remitente
+                        await broadcast.publish(channel=f"user_{recipient_id}", message=payload)
+                        await broadcast.publish(channel=f"user_{user_id_safe}", message=payload)
+                
+                finally:
+                    db.close() # MUY IMPORTANTE: Cerramos la sesión CORTA
+                # ====================== FIN DEL CAMBIO CLAVE =======================
+        
         except WebSocketDisconnect:
             pass # El bucle de subscribe se encargará de la desconexión
         except Exception as e:
-            print(f"Error en receive_messages para usuario {user_id}: {e}")
+            print(f"Error en receive_messages para usuario {user_id_safe}: {e}")
 
     async def send_messages():
+        # Esta función no cambia. Solo escucha y envía lo que recibe.
         try:
-            async with broadcast.subscribe(channel=f"user_{user_id}") as subscriber:
+            async with broadcast.subscribe(channel=f"user_{user_id_safe}") as subscriber:
                 async for event in subscriber:
                     await websocket.send_text(event.message)
         except Exception as e:
-            print(f"Error en send_messages para usuario {user_id}: {e}")
+            print(f"Error en send_messages para usuario {user_id_safe}: {e}")
 
     # Ejecuta ambas tareas concurrentemente
     try:
         await asyncio.gather(receive_messages(), send_messages())
     except Exception as e:
-        print(f"WebSocket cerrado para el usuario {user_id}. Error: {e}")
-
+        print(f"WebSocket cerrado para el usuario {user_id_safe}. Error: {e}")
 
 @app.get("/users/{user_id}/public-profile", response_model=UserPublicResponse)
 async def get_public_user_profile(user_id: int, db: Session = Depends(get_db)):
@@ -2034,58 +2086,6 @@ async def handle_mercadopago_webhook(request: Request, db: Session = Depends(get
             return Response(status_code=status.HTTP_200_OK)
             
     return Response(status_code=status.HTTP_200_OK)
-
-@app.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: int, db: Session = Depends(get_db)):
-    await manager.connect(user_id, websocket)
-    current_user = db.query(User).filter(User.id == user_id).first()
-    if not current_user:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-
-    try:
-        while True:
-            data = await websocket.receive_text()
-            message_data = json.loads(data)
-            
-            proposal_id = message_data.get('proposal_id')
-            proposal = db.query(Proposal).filter(Proposal.id == proposal_id).first()
-
-            if not proposal or (current_user.id not in [proposal.proposer_user_id, proposal.owner_of_requested_product_id]):
-                continue
-
-            db_message = Message(
-                proposal_id=proposal_id,
-                sender_id=current_user.id,
-                text=message_data['text'],
-                timestamp=datetime.utcnow()
-            )
-            db.add(db_message)
-            db.commit()
-            db.refresh(db_message)
-            
-            message_to_send = {
-                "id": db_message.id,
-                "proposal_id": db_message.proposal_id,
-                "sender_id": db_message.sender_id,
-                "text": db_message.text,
-                "timestamp": db_message.timestamp.isoformat(),
-                "is_read": db_message.is_read
-            }
-            
-            payload = json.dumps({"type": "new_message", "data": message_to_send})
-
-            recipient_id = proposal.owner_of_requested_product_id if current_user.id == proposal.proposer_user_id else proposal.proposer_user_id
-
-            # Enviar al destinatario y al remitente
-            await manager.send_personal_message(payload, recipient_id)
-            await manager.send_personal_message(payload, current_user.id)
-
-    except WebSocketDisconnect:
-        manager.disconnect(user_id)
-    except Exception as e:
-        print(f"Error en WebSocket para usuario {user_id}: {e}")
-        manager.disconnect(user_id)
 
 @app.post("/payment/process_payment", status_code=status.HTTP_201_CREATED)
 async def process_payment(
