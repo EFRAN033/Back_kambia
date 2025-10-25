@@ -427,7 +427,7 @@ class UserResponse(BaseModel):
     rating_score: Optional[float] = 0.0
     rating_count: int = 0
 
-    is_admin: bool = False
+    role: str = 'user'
 
     class Config:
         from_attributes = True
