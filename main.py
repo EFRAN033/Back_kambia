@@ -92,6 +92,7 @@ class User(Base):
     occupation = Column(String(100), nullable=True)
     bio = Column(Text, nullable=True)
     dni = Column(String(12), nullable=True, unique=True)
+    role = Column(String(50), nullable=False, default='user')
     credits = Column(Integer, default=10, nullable=False)
     # He notado que usas 'user_interests_table' aquí, asegúrate de que esa sea 
     # la variable correcta donde definiste la tabla de unión. 
@@ -430,6 +431,7 @@ class ProposalStatusUpdate(BaseModel):
 class TokenData(BaseModel):
     email: Optional[str] = None
     user_id: Optional[int] = None
+    role: Optional[str] = None
 
 class PasswordUpdate(BaseModel):
     current_password: str
@@ -2170,4 +2172,4 @@ async def process_payment(
             detail=f"Error interno del servidor: {e}"
         )
     
-#app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
+app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
