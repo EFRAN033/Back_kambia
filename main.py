@@ -427,6 +427,8 @@ class UserResponse(BaseModel):
     rating_score: Optional[float] = 0.0
     rating_count: int = 0
 
+    is_admin: bool = False
+
     class Config:
         from_attributes = True
 
@@ -1481,6 +1483,8 @@ async def create_product(
 
 # Pega esto en main.py
 
+# Pega esto en main.py (reemplazando tu función /api/admin/login existente)
+
 @app.post("/api/admin/login", response_model=AdminLoginResponse) # <-- Usa el nuevo response_model
 async def login_admin(user_login: UserLogin, db: Session = Depends(get_db)):
     
@@ -1539,13 +1543,17 @@ async def login_admin(user_login: UserLogin, db: Session = Depends(get_db)):
         interests=[interest.name for interest in db_user.interests],
         profile_picture=db_user.profile_picture,
         rating_score=rating_score,
-        rating_count=rating_count
+        rating_count=rating_count,
+        
+        # --- ESTA ES LA LÍNEA QUE SOLUCIONA EL PROBLEMA ---
+        is_admin=(db_user.role == "admin")
+        # ----------------------------------------------------
     )
 
     return {
         "access_token": access_token, 
         "token_type": "bearer",
-        "user": user_response_data # Devuelve la info del usuario
+        "user": user_response_data # Ahora 'user' SÍ incluye 'is_admin: true'
     }
 
 @app.post("/proposals", response_model=ProposalResponse, status_code=status.HTTP_201_CREATED)
