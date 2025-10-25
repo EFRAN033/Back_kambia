@@ -260,6 +260,16 @@ class CreditPurchaseRequest(BaseModel):
     unit_price: float = Field(..., gt=0.0)
     title: str = "Compra de Créditos para KambiaPe"
 
+class UserReportResponse(BaseModel):
+    id: int
+    reporter_id: int
+    reported_id: int
+    reason: str
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
 class PaymentRequest(BaseModel):
     token: str
     issuer_id: str
@@ -433,6 +443,11 @@ class TokenData(BaseModel):
     user_id: Optional[int] = None
     role: Optional[str] = None
 
+class AdminLoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
 class PasswordUpdate(BaseModel):
     current_password: str
     new_password: str
@@ -491,7 +506,18 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         raise credentials_exception
     return user
 
-
+async def get_current_admin_user(current_user: User = Depends(get_current_user)):
+    """
+    Una dependencia que obtiene el usuario actual y verifica si tiene el rol 'admin'.
+    Si no es admin, lanza un error HTTP 403.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos de administrador para realizar esta acción."
+        )
+    return current_user
+    
 class ProductImageResponse(BaseModel):
     id: int
     product_id: int
@@ -1245,6 +1271,17 @@ async def get_public_user_profile(user_id: int, db: Session = Depends(get_db)):
         rating_count=rating_count
     )
 
+@app.get("/admin/all_reports", response_model=List[UserReportResponse])
+async def get_all_user_reports(
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user) # <--- PROTEGIDO
+):
+    """
+    Obtiene todos los reportes de usuarios. Solo para administradores.
+    """
+    reports = db.query(UserReport).order_by(UserReport.created_at.desc()).all()
+    return reports
+
 @app.delete("/proposals/{proposal_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_proposal(
     proposal_id: int,
@@ -1441,6 +1478,75 @@ async def create_product(
         images=[ProductImageResponse.from_orm(img) for img in new_product.images],
         exchange_interests=[interest.name for interest in new_product.exchange_interests]
     )
+
+# Pega esto en main.py
+
+@app.post("/api/admin/login", response_model=AdminLoginResponse) # <-- Usa el nuevo response_model
+async def login_admin(user_login: UserLogin, db: Session = Depends(get_db)):
+    
+    # 1. Verificamos las credenciales (igual que en el login normal)
+    db_user = db.query(User).options(joinedload(User.interests)).filter(User.email == user_login.email).first()
+
+    if not db_user or not verify_password(user_login.password, db_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Credenciales incorrectas: Correo o contraseña inválidos."
+        )
+    
+    # 2. ¡VERIFICACIÓN DE ROL! (Esta es la parte clave)
+    if db_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso denegado. No tienes permisos de administrador."
+        )
+
+    # 3. Si es admin, creamos y devolvemos el token + usuario
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    access_token_data = {
+        "sub": db_user.email, 
+        "user_id": db_user.id,
+        "role": db_user.role  # Incluimos el rol en el token
+    }
+
+    access_token = create_access_token(
+        data=access_token_data,
+        expires_delta=access_token_expires
+    )
+    
+    # Calculamos el rating (ya que UserResponse lo requiere)
+    rating_count = len(db_user.ratings_received)
+    rating_score = 0.0
+    if rating_count > 0:
+        rating_score = sum(r.score for r in db_user.ratings_received) / rating_count
+
+    # Construimos la respuesta de UserResponse
+    user_response_data = UserResponse(
+        id=db_user.id,
+        full_name=db_user.full_name,
+        email=db_user.email,
+        agreed_terms=db_user.agreed_terms,
+        created_at=db_user.created_at,
+        phone=db_user.phone,
+        ubicacion=db_user.ubicacion,
+        district_id=db_user.district_id,
+        date_of_birth=db_user.date_of_birth,
+        gender=db_user.gender,
+        occupation=db_user.occupation,
+        bio=db_user.bio,
+        dni=db_user.dni,
+        credits=db_user.credits,
+        interests=[interest.name for interest in db_user.interests],
+        profile_picture=db_user.profile_picture,
+        rating_score=rating_score,
+        rating_count=rating_count
+    )
+
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "user": user_response_data # Devuelve la info del usuario
+    }
 
 @app.post("/proposals", response_model=ProposalResponse, status_code=status.HTTP_201_CREATED)
 async def create_proposal(
