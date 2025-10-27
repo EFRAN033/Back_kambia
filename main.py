@@ -7,7 +7,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, joinedload
 import os
 from dotenv import load_dotenv
-from typing import List, Optional, Dict, Literal, Set # <-- LÍNEA CORREGIDA Y UNIFICADA
+from typing import List, Optional, Dict, Literal, Set
 from passlib.context import CryptContext
 from sqlalchemy import Table
 from sqlalchemy import func
@@ -23,12 +23,17 @@ import mercadopago
 from typing import List, Dict
 import asyncio
 from broadcaster import Broadcast
-
+from sqlalchemy.orm import joinedload
 #Importaciones para la validacion de dni con PeruDevs
 import requests
 import re
 
-# --- Configuración de la base de datos ---
+hero_section_data = {
+    # "title": "...", <-- Quita o comenta esta
+    "titleLine1": "Intercambia fácil, seguro", # Valor por defecto
+    "titleLine2": "y sin comisiones",      # Valor por defecto
+    "imageUrl": "/uploaded_images/default_hero.jpg" # Imagen por defecto
+}
 load_dotenv()
 
 # 1. PRIMERO, defines la variable leyendo el archivo .env
@@ -94,9 +99,8 @@ class User(Base):
     dni = Column(String(12), nullable=True, unique=True)
     role = Column(String(50), nullable=False, default='user')
     credits = Column(Integer, default=10, nullable=False)
-    # He notado que usas 'user_interests_table' aquí, asegúrate de que esa sea 
-    # la variable correcta donde definiste la tabla de unión. 
-    # Si la llamaste 'user_interests' como en mi paso anterior, usa ese nombre.
+    is_active = Column(Boolean, default=True, nullable=False)
+
     interests = relationship("Category", secondary=user_interests_table, back_populates="interested_users", lazy="joined")
     profile_picture = Column(String(500), nullable=True)
 
@@ -108,7 +112,7 @@ class User(Base):
     proposals_received = relationship("Proposal", foreign_keys="[Proposal.owner_of_requested_product_id]", back_populates="owner_of_requested_product")
 
     blocked_users = relationship("User", 
-                                 secondary=user_blocks, # <-- Asegúrate que esta tabla se llame 'user_blocks'
+                                 secondary=user_blocks,
                                  primaryjoin=(id == user_blocks.c.blocker_id),
                                  secondaryjoin=(id == user_blocks.c.blocked_id),
                                  backref="blocked_by_users")
@@ -244,6 +248,12 @@ class UserRatingBase(BaseModel):
 class UserRatingCreate(UserRatingBase):
     rated_id: int
     proposal_id: int
+
+class AdminCreditUpdate(BaseModel):
+    credits: int = Field(..., ge=0) 
+
+class AdminStatusUpdate(BaseModel):
+    is_active: bool
 
 class UserRatingResponse(UserRatingBase):
     id: int
@@ -406,6 +416,10 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class AdminStats(BaseModel):
+    total_users: int
+    total_products: int
+
 class UserResponse(BaseModel):
     id: int
     full_name: str
@@ -423,6 +437,7 @@ class UserResponse(BaseModel):
     credits: int
     interests: List[str] = []
     profile_picture: str | None = None
+    is_active: bool
 
     rating_score: Optional[float] = 0.0
     rating_count: int = 0
@@ -591,6 +606,13 @@ class ProductPublicResponse(BaseModel): # Un modelo más ligero para productos e
     class Config:
         from_attributes = True
 
+class ChartDataPoint(BaseModel):
+    label: str  # La etiqueta del eje X (ej. '2023-10-27' o '2023-W43')
+    count: int  # El valor del eje Y
+
+class ChartDataResponse(BaseModel):
+    labels: List[str]
+    datasets: List[Dict[str, object]]
 
 # Esquema Pydantic para ProposalCreate
 class ProposalCreate(BaseModel):
@@ -619,7 +641,11 @@ class ProposalResponse(BaseModel):
 class ReportCreate(BaseModel):
     reason: str
 
-# NUEVO: Pydantic model para un mensaje individual
+class HeroData(BaseModel):
+    titleLine1: str
+    titleLine2: str
+    imageUrl: Optional[str] = None
+
 class MessageResponse(BaseModel):
     id: int
     proposal_id: int
@@ -917,6 +943,33 @@ async def update_proposal_status(
     
     return proposal
 
+@app.get("/admin/stats", response_model=AdminStats)
+async def get_admin_stats(
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user) # <-- ¡Esto lo protege!
+):
+    """
+    Obtiene estadísticas básicas para el dashboard de admin.
+    Solo accesible por administradores.
+    """
+    try:
+        # Cuenta el total de usuarios en la tabla User
+        total_users = db.query(User).count()
+        
+        # Cuenta el total de productos en la tabla Product
+        total_products = db.query(Product).count()
+        
+        return AdminStats(
+            total_users=total_users, 
+            total_products=total_products
+        )
+    except Exception as e:
+        print(f"Error al calcular estadísticas: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al obtener las estadísticas."
+        )
+
 @app.get("/profile/{user_id}", response_model=UserResponse)
 async def get_user_profile(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     # Verifica que el usuario solo pueda ver su propio perfil.
@@ -958,8 +1011,10 @@ async def get_user_profile(user_id: int, db: Session = Depends(get_db), current_
         "credits": user.credits,
         "interests": [interest.name for interest in user.interests],
         "profile_picture": user.profile_picture,
-        "rating_score": rating_score,     # <-- Campo añadido
-        "rating_count": rating_count      # <-- Campo añadido
+        "rating_score": rating_score,    
+        "rating_count": rating_count, 
+        "role": user.role,
+        "is_active": user.is_active  
     }
     
     # Devuelve la respuesta usando el modelo Pydantic UserResponse
@@ -1002,7 +1057,55 @@ async def get_proposal_messages(
     messages = db.query(Message).filter(Message.proposal_id == proposal_id).order_by(Message.timestamp.asc()).all()
     return messages
 
+@app.get("/api/admin/users", response_model=List[UserResponse])
+async def get_all_users(
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user) # <-- Protección de admin
+):
+    """
+    Obtiene una lista de todos los usuarios. Solo para administradores.
+    """
+    # Usamos joinedload para cargar las relaciones que UserResponse necesita
+    users = db.query(User).options(
+        joinedload(User.interests),
+        joinedload(User.ratings_received)
+    ).order_by(User.id.asc()).all()
 
+    # Debemos construir manualmente la respuesta para
+    # asegurarnos de que los campos 'rating_score' y 'rating_count' se calculen
+    user_responses = []
+    for user in users:
+        rating_count = len(user.ratings_received)
+        if rating_count > 0:
+            rating_score = sum(r.score for r in user.ratings_received) / rating_count
+        else:
+            rating_score = 0.0
+
+        user_data = UserResponse(
+            id=user.id,
+            full_name=user.full_name,
+            email=user.email,
+            agreed_terms=user.agreed_terms,
+            created_at=user.created_at,
+            phone=user.phone,
+            ubicacion=user.ubicacion,
+            district_id=user.district_id,
+            date_of_birth=user.date_of_birth,
+            gender=user.gender,
+            occupation=user.occupation,
+            bio=user.bio,
+            dni=user.dni,
+            credits=user.credits,
+            interests=[interest.name for interest in user.interests],
+            profile_picture=user.profile_picture,
+            rating_score=rating_score,
+            rating_count=rating_count, 
+            role=user.role,
+            is_active=user.is_active
+        )
+        user_responses.append(user_data)
+    
+    return user_responses
 
 @app.get("/categories", response_model=List[CategoryResponse])
 async def get_all_categories(db: Session = Depends(get_db)):
@@ -1544,9 +1647,10 @@ async def login_admin(user_login: UserLogin, db: Session = Depends(get_db)):
         profile_picture=db_user.profile_picture,
         rating_score=rating_score,
         rating_count=rating_count,
+        is_active=db_user.is_active,
         
         # --- ESTA ES LA LÍNEA QUE SOLUCIONA EL PROBLEMA ---
-        is_admin=(db_user.role == "admin")
+        role=db_user.role
         # ----------------------------------------------------
     )
 
@@ -1707,6 +1811,7 @@ async def get_my_proposals(
             last_message_response = MessageResponse.from_orm(last_message_obj)
         else:
             last_message_response = MessageResponse(
+                proposal_id=proposal.id,
                 id=0, sender_id=proposal.proposer_user_id,
                 text="Propuesta iniciada...",
                 timestamp=proposal.created_at, is_read=True
@@ -2286,4 +2391,241 @@ async def process_payment(
             detail=f"Error interno del servidor: {e}"
         )
     
+@app.get("/admin/chart-data", response_model=ChartDataResponse)
+async def get_admin_chart_data(
+    metric: Literal['users', 'products', 'proposals', 'transactions'] = Query(...),
+    period: Literal['daily', 'weekly', 'monthly', 'yearly'] = Query('monthly'),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user)
+):
+    """
+    Obtiene datos agregados listos para un gráfico, basados en una métrica
+    y un período de tiempo.
+    """
+    
+    # 1. Mapear el 'period' a un formato de truncamiento de fecha de SQL
+    # (Usamos 'to_char' para formatear la etiqueta, esto es para PostgreSQL.
+    # Si usas MySQL, necesitarías cambiarlo por DATE_FORMAT)
+    period_format_map = {
+        'daily': ('day', 'YYYY-MM-DD'),
+        'weekly': ('week', 'YYYY-WW'),
+        'monthly': ('month', 'YYYY-MM'),
+        'yearly': ('year', 'YYYY'),
+    }
+    
+    if period not in period_format_map:
+        raise HTTPException(status_code=400, detail="Período no válido")
+
+    trunc_period, date_format = period_format_map[period]
+
+    # 2. Mapear la 'metric' al modelo y columna de fecha correctos
+    metric_config = {
+        'users': {
+            "model": User,
+            "date_col": User.created_at,
+            "filter": None,
+            "label": "Nuevos Usuarios"
+        },
+        'products': {
+            "model": Product,
+            "date_col": Product.created_at,
+            "filter": None,
+            "label": "Nuevas Publicaciones"
+        },
+        'proposals': {
+            "model": Proposal,
+            "date_col": Proposal.updated_at, # Usamos updated_at para capturar cuándo se completó
+            "filter": (Proposal.status == 'completed'),
+            "label": "Propuestas Completadas"
+        },
+        'transactions': {
+            "model": Transaction,
+            "date_col": Transaction.updated_at, # Usamos updated_at para capturar cuándo se aprobó
+            "filter": (Transaction.status == 'approved'),
+            "label": "Ventas Aprobadas"
+        },
+    }
+
+    if metric not in metric_config:
+        raise HTTPException(status_code=400, detail="Métrica no válida")
+        
+    config = metric_config[metric]
+    model = config["model"]
+    date_col = config["date_col"]
+
+    # 3. Construir la consulta
+    try:
+        # Truncamos la fecha y la formateamos como texto para la etiqueta
+        date_label = func.to_char(
+            func.date_trunc(trunc_period, date_col),
+            date_format
+        ).label('label')
+        
+        query = db.query(
+            date_label,
+            func.count(model.id).label('count')
+        )
+
+        # Aplicar filtros si existen (para propuestas 'completed' o transacciones 'approved')
+        if config["filter"] is not None:
+            query = query.filter(config["filter"])
+            
+        # Agrupar y ordenar por la etiqueta de fecha
+        results = query.group_by(date_label).order_by(date_label.asc()).all()
+
+        # 4. Formatear la respuesta para Chart.js
+        labels = [r.label for r in results]
+        data = [r.count for r in results]
+        
+        return ChartDataResponse(
+            labels=labels,
+            datasets=[
+                {
+                    "label": config["label"],
+                    "data": data,
+                    "backgroundColor": 'rgba(79, 70, 229, 0.2)', # Color Indigo
+                    "borderColor": 'rgba(79, 70, 229, 1)',
+                    "borderWidth": 2,
+                    "tension": 0.1,
+                    "fill": True,
+                }
+            ]
+        )
+
+    except Exception as e:
+        print(f"Error al generar datos del gráfico: {e}")
+        # Captura errores comunes de sintaxis de BD (ej. si no es PostgreSQL)
+        if "DATE_FORMAT" in str(e) or "to_char" in str(e):
+             raise HTTPException(
+                status_code=500,
+                detail="Error de base de datos. Es posible que la función de formato de fecha (to_char/DATE_FORMAT) no sea compatible con tu dialecto de SQL."
+            )
+        raise HTTPException(
+            status_code=500,
+            detail="Error interno al procesar los datos del gráfico."
+        )
+    
+@app.delete("/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user_by_admin(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user)
+):
+    """
+    Elimina permanentemente a un usuario. (Acción de Admin)
+    """
+    if user_id == admin.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El administrador no se puede eliminar a sí mismo.")
+        
+    db_user = db.query(User).filter(User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+    
+    db.delete(db_user)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+@app.put("/admin/users/{user_id}/credits", response_model=UserResponse)
+async def update_user_credits(
+    user_id: int,
+    credit_data: AdminCreditUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user)
+):
+    """
+    Establece el balance de créditos de un usuario. (Acción de Admin)
+    """
+    db_user = db.query(User).filter(User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+        
+    db_user.credits = credit_data.credits
+    db.commit()
+    db.refresh(db_user)
+    
+    # Devuelve el usuario actualizado completo (necesario para UserResponse)
+    return await get_user_profile(user_id, db, db_user)
+
+@app.put("/admin/users/{user_id}/status", response_model=UserResponse)
+async def update_user_status(
+    user_id: int,
+    status_data: AdminStatusUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user)
+):
+    """
+    Activa o desactiva (banea) a un usuario. (Acción de Admin)
+    """
+    if user_id == admin.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El administrador no se puede desactivar a sí mismo.")
+        
+    db_user = db.query(User).filter(User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+        
+    db_user.is_active = status_data.is_active
+    db.commit()
+    db.refresh(db_user)
+    
+    return await get_user_profile(user_id, db, db_user)
+
+@app.get("/admin/users/{user_id}/proposals", response_model=List[ProposalResponse])
+async def get_user_proposals_history(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user)
+):
+    """
+    Obtiene el historial de todas las propuestas (intercambios) de un usuario. (Acción de Admin)
+    """
+    # Carga todas las propuestas donde el usuario es el proponente O el receptor
+    proposals = db.query(Proposal).options(
+        joinedload(Proposal.offered_product),
+        joinedload(Proposal.requested_product),
+        joinedload(Proposal.proposer),
+        joinedload(Proposal.owner_of_requested_product)
+    ).filter(
+        or_(
+            Proposal.proposer_user_id == user_id,
+            Proposal.owner_of_requested_product_id == user_id
+        )
+    ).order_by(Proposal.updated_at.desc()).all()
+    
+    return proposals
+    
+@app.get("/api/hero", response_model=HeroData)
+async def get_hero_data():
+    return hero_section_data
+
+# 2. Endpoint de ADMIN para obtener datos del Hero (para HeroSection-admin.vue)
+@app.get("/api/admin/hero", response_model=HeroData)
+async def get_admin_hero_data(admin: User = Depends(get_current_admin_user)):
+    return hero_section_data
+
+# 3. Endpoint de ADMIN para ACTUALIZAR datos del Hero (para HeroSection-admin.vue)
+@app.put("/api/admin/hero", response_model=HeroData)
+async def update_hero_data(
+    # title: str = Form(...), <-- Quita o comenta esta
+    titleLine1: str = Form(...), # <-- Añade esta
+    titleLine2: str = Form(...), # <-- Añade esta
+    image: Optional[UploadFile] = File(None),
+    admin: User = Depends(get_current_admin_user)
+):
+    global hero_section_data
+    new_image_url = hero_section_data["imageUrl"]
+
+    if image:
+        try:
+            new_image_url = await save_upload_file(image)
+        except Exception as e:
+            print(f"Error al procesar la nueva imagen del hero: {e}")
+            raise HTTPException(status_code=500, detail="Error al guardar la nueva imagen.")
+
+    # Actualizar los datos globales con las nuevas líneas
+    hero_section_data["titleLine1"] = titleLine1
+    hero_section_data["titleLine2"] = titleLine2
+    hero_section_data["imageUrl"] = new_image_url
+
+    return hero_section_data
+
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
