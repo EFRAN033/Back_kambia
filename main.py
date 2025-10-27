@@ -29,10 +29,36 @@ import requests
 import re
 
 hero_section_data = {
-    # "title": "...", <-- Quita o comenta esta
-    "titleLine1": "Intercambia fácil, seguro", # Valor por defecto
-    "titleLine2": "y sin comisiones",      # Valor por defecto
-    "imageUrl": "/uploaded_images/default_hero.jpg" # Imagen por defecto
+    # Textos generales (como los tenías)
+    "titleLine1": "Intercambia fácil, seguro",
+    "titleLine2": "y sin comisiones",
+    "badgeText": "Bienvenido a KambiaPe",
+    "paragraphText": "Publica lo que ya no usas y encuentra lo que necesitas en tu comunidad.",
+    "button1Text": "Publicar objeto",
+    "button2Text": "Buzón",
+
+    # Lista de tarjetas con valores por defecto
+    "cards": [
+        {
+            "id": 1,
+            "alt": "Cámara",
+            "badge": "Destacado",
+            # Usa rutas relativas si las imágenes están en /uploaded_images/ o None si no hay default
+            "imageUrl": "/src/assets/imagenes/gif/Animacion_Mesa de trabajo 1-01.png" # O None
+        },
+        {
+            "id": 2,
+            "alt": "Mochila",
+            "badge": "Outdoor",
+            "imageUrl": "/src/assets/imagenes/gif/Animacion_Mesa de trabajo 1-02.png" # O None
+        },
+        {
+            "id": 3,
+            "alt": "Teclado",
+            "badge": "Gaming",
+            "imageUrl": "/src/assets/imagenes/gif/Animacion_Mesa de trabajo 1-03.png" # O None
+        }
+    ]
 }
 load_dotenv()
 
@@ -263,12 +289,18 @@ class UserRatingResponse(UserRatingBase):
     created_at: datetime
 
     class Config:
-        from_attributes = True # <-- CAMBIO DE orm_mode
+        from_attributes = True 
 
 class CreditPurchaseRequest(BaseModel):
-    quantity: int = Field(..., gt=0) # gt=0 asegura que sea un número positivo
+    quantity: int = Field(..., gt=0) 
     unit_price: float = Field(..., gt=0.0)
     title: str = "Compra de Créditos para KambiaPe"
+
+class HeroCard(BaseModel):
+    id: int
+    alt: str
+    badge: str
+    imageUrl: Optional[str] = None    
 
 class UserReportResponse(BaseModel):
     id: int
@@ -644,7 +676,11 @@ class ReportCreate(BaseModel):
 class HeroData(BaseModel):
     titleLine1: str
     titleLine2: str
-    imageUrl: Optional[str] = None
+    badgeText: str      
+    paragraphText: str  
+    button1Text: str    
+    button2Text: str    
+    cards: List[HeroCard] = []
 
 class MessageResponse(BaseModel):
     id: int
@@ -2605,27 +2641,139 @@ async def get_admin_hero_data(admin: User = Depends(get_current_admin_user)):
 # 3. Endpoint de ADMIN para ACTUALIZAR datos del Hero (para HeroSection-admin.vue)
 @app.put("/api/admin/hero", response_model=HeroData)
 async def update_hero_data(
-    # title: str = Form(...), <-- Quita o comenta esta
-    titleLine1: str = Form(...), # <-- Añade esta
-    titleLine2: str = Form(...), # <-- Añade esta
-    image: Optional[UploadFile] = File(None),
-    admin: User = Depends(get_current_admin_user)
+    # Textos generales (como antes)
+    titleLine1: str = Form(...),
+    titleLine2: str = Form(...),
+    badgeText: str = Form(...),
+    paragraphText: str = Form(...),
+    button1Text: str = Form(...),
+    button2Text: str = Form(...),
+
+    # Textos de las tarjetas (recibidos con índice)
+    card_0_alt: str = Form(...),
+    card_0_badge: str = Form(...),
+    card_1_alt: str = Form(...),
+    card_1_badge: str = Form(...),
+    card_2_alt: str = Form(...),
+    card_2_badge: str = Form(...),
+
+    # Imágenes opcionales de las tarjetas (recibidas con índice)
+    card_0_image: Optional[UploadFile] = File(None),
+    card_1_image: Optional[UploadFile] = File(None),
+    card_2_image: Optional[UploadFile] = File(None),
+
+    admin: User = Depends(get_current_admin_user) # Asegura que solo admin pueda hacer esto
 ):
-    global hero_section_data
-    new_image_url = hero_section_data["imageUrl"]
+    """
+    Actualiza todos los textos y las imágenes (opcionales) del Hero Section,
+    incluyendo las 3 tarjetas rotativas.
+    """
+    global hero_section_data # Necesario para modificar la variable global
 
-    if image:
-        try:
-            new_image_url = await save_upload_file(image)
-        except Exception as e:
-            print(f"Error al procesar la nueva imagen del hero: {e}")
-            raise HTTPException(status_code=500, detail="Error al guardar la nueva imagen.")
+    # --- Procesamiento de Imágenes de Tarjetas ---
+    # Mantiene las URLs actuales como fallback si no se sube nueva imagen
+    new_card_image_urls = [
+        hero_section_data["cards"][0].get("imageUrl") if len(hero_section_data.get("cards", [])) > 0 else None,
+        hero_section_data["cards"][1].get("imageUrl") if len(hero_section_data.get("cards", [])) > 1 else None,
+        hero_section_data["cards"][2].get("imageUrl") if len(hero_section_data.get("cards", [])) > 2 else None
+    ]
+    # Lista de archivos subidos
+    card_images_files = [card_0_image, card_1_image, card_2_image]
 
-    # Actualizar los datos globales con las nuevas líneas
+    for i, image_file in enumerate(card_images_files):
+        if image_file: # Si se subió un archivo para esta tarjeta
+            try:
+                # --- Opcional: Lógica para borrar imagen antigua ---
+                # old_image_path = hero_section_data["cards"][i].get("imageUrl")
+                # # Evita borrar imágenes por defecto o rutas inválidas
+                # if old_image_path and old_image_path.startswith(f"/{UPLOAD_DIR}/"):
+                #     full_old_path = os.path.join(os.getcwd(), old_image_path.lstrip('/'))
+                #     if os.path.exists(full_old_path):
+                #         try:
+                #             os.remove(full_old_path)
+                #             print(f"Imagen anterior de tarjeta {i} eliminada: {full_old_path}")
+                #         except OSError as e:
+                #             print(f"Error al eliminar imagen anterior de tarjeta {i} ({full_old_path}): {e}")
+                # --- Fin Lógica Opcional ---
+
+                # Guardar la nueva imagen y obtener su URL web
+                new_url = await save_upload_file(image_file)
+                new_card_image_urls[i] = new_url # Actualizar la URL para esta tarjeta en nuestra lista temporal
+                print(f"Nueva imagen para tarjeta {i} guardada en: {new_url}")
+
+            except Exception as e:
+                # Si falla el guardado de una imagen, registrar y devolver error
+                print(f"Error crítico al procesar imagen para tarjeta {i}: {e}")
+                # Puedes decidir si continuar con las otras o fallar todo
+                raise HTTPException(status_code=500, detail=f"Error interno al guardar la imagen para la tarjeta {i+1}.")
+
+    # --- Actualización de Datos Globales ---
+    # Actualizar textos generales
     hero_section_data["titleLine1"] = titleLine1
     hero_section_data["titleLine2"] = titleLine2
-    hero_section_data["imageUrl"] = new_image_url
+    hero_section_data["badgeText"] = badgeText
+    hero_section_data["paragraphText"] = paragraphText
+    hero_section_data["button1Text"] = button1Text
+    hero_section_data["button2Text"] = button2Text
 
-    return hero_section_data
+    # Actualizar la lista de tarjetas con los nuevos textos y las URLs de imagen procesadas
+    hero_section_data["cards"] = [
+        # Usamos los IDs fijos 1, 2, 3 o podríamos generarlos si fuera necesario
+        {"id": 1, "alt": card_0_alt, "badge": card_0_badge, "imageUrl": new_card_image_urls[0]},
+        {"id": 2, "alt": card_1_alt, "badge": card_1_badge, "imageUrl": new_card_image_urls[1]},
+        {"id": 3, "alt": card_2_alt, "badge": card_2_badge, "imageUrl": new_card_image_urls[2]},
+    ]
+
+    print("Datos completos del Hero actualizados:", hero_section_data) # Log para depuración
+
+    # --- Validación y Respuesta ---
+    # Validar que la estructura final coincida con el modelo Pydantic HeroData
+    try:
+        validated_data = HeroData(**hero_section_data)
+        # Devolver el objeto validado (Pydantic lo convierte a JSON)
+        return validated_data
+    except Exception as e: # Captura errores de validación Pydantic (ej. si falta un campo)
+        print(f"Error de validación Pydantic al preparar la respuesta: {e}")
+        # En producción, podrías querer devolver un error 500 más genérico
+        raise HTTPException(status_code=500, detail=f"Error interno al validar los datos actualizados: {e}")
+
+@app.get("/admin/users/{user_id}/blocked", response_model=List[UserPublicResponse])
+async def get_users_blocked_by_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user) # Protegido por admin
+):
+    """
+    Devuelve la lista de usuarios que el usuario con user_id ha bloqueado.
+    """
+    user = db.query(User).options(
+        joinedload(User.blocked_users) # Carga eficiente de la relación
+    ).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+
+    # La relación 'blocked_users' ya contiene la lista de objetos User
+    # Pydantic se encargará de serializarlos usando UserPublicResponse
+    return user.blocked_users
+
+@app.get("/admin/users/{user_id}/blocked-by", response_model=List[UserPublicResponse])
+async def get_users_who_blocked_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user) # Protegido por admin
+):
+    """
+    Devuelve la lista de usuarios que han bloqueado al usuario con user_id.
+    """
+    user = db.query(User).options(
+        joinedload(User.blocked_by_users) # Carga eficiente de la relación (backref)
+    ).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+
+    # La relación 'blocked_by_users' (definida por backref) contiene la lista
+    return user.blocked_by_users
 
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
