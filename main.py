@@ -60,6 +60,44 @@ hero_section_data = {
         }
     ]
 }
+
+# --- Datos para la página "Nosotros" ---
+about_us_data = {
+  "hero": {
+    "badge": "Perú • Comunidad • Innovación",
+    "title": "Ideas en acción.",
+    "paragraph": "KambiaPe conecta personas para transformar barrios, escuelas y emprendimientos. Simple, local, real.",
+    "btn1": "Conoce la historia",
+    "btn2": "Conócenos!"
+  },
+  "heroCards": [
+    { "id": 1, "alt": "Mentoría STEAM en colegio público", "caption": "Educación", "title": "Escuelas que inspiran", "imageUrl": "/uploads/placeholder1.jpg" },
+    { "id": 2, "alt": "Reciclaje y compostaje comunitario", "caption": "Sostenibilidad", "title": "Rutas verdes", "imageUrl": "/uploads/placeholder2.jpg" },
+    { "id": 3, "alt": "Emprendimiento local y comercio digital", "caption": "Emprendimiento", "title": "Impulso emprendedor", "imageUrl": "/uploads/placeholder3.jpg" }
+  ],
+  "about": {
+    "title": "Trueque con propósito.",
+    "paragraph": "Creamos puentes entre personas y barrios para que el intercambio vuelva a ser cotidiano, justo y medible.",
+    "quote": "Intercambiar es confiar y co-crear."
+  },
+  "tabs": [
+    { "id": 1, "type": "Qué es", "paragraph": "Una red donde productos, servicios y conocimientos se intercambian con reglas claras, reputación visible y mediación. Tecnología al servicio de la confianza local.", "quote": "Lo digital acerca, la comunidad decide.", "list": "", "footer": "", "alt": "Personas colaborando", "caption": "Colaboración", "imageUrl": "/uploads/placeholder4.jpg" },
+    { "id": 2, "type": "Misión", "paragraph": "Facilitar el intercambio justo entre personas mediante una plataforma confiable, segura y usable, con foco en impacto local.", "quote": "", "list": "Reglas claras y reputación pública.\nInclusión económica en barrios y escuelas.\nMenos desperdicio a través de la reutilización.", "footer": "", "alt": "Huertos urbanos", "caption": "Reutilización", "imageUrl": "/uploads/placeholder5.jpg" },
+    { "id": 3, "type": "Visión", "paragraph": "Liderar el intercambio solidario en Perú con una economía colaborativa y sostenible, conectando comunidades a nivel nacional a través de alianzas locales y tecnología centrada en las personas.", "quote": "", "list": "", "footer": "Alianzas con municipios y escuelas, embajadores locales y un motor de matching...", "alt": "Robótica y formación", "caption": "Formación", "imageUrl": "/uploads/placeholder6.jpg" }
+  ],
+  "community": {
+    "title": "El corazón de KambiaPe es su gente.",
+    "paragraph": "Únete a nuestra comunidad en WhatsApp para conectar, compartir ideas y ser el primero en enterarte de las novedades.",
+    "btnText": "Unirme a la Comunidad",
+    "link": "https://chat.whatsapp.com/Kekd3xJZtet8J6TLhTGFDQ?mode=ems_wa_t"
+  },
+  "social": {
+    "insta": "https://www.instagram.com/kambia_pe?igsh=MWg2aWR3YnhnNW1qdw==",
+    "tiktok": "https://tiktok.com/@kambiape",
+    "facebook": "https://www.facebook.com/share/1A62pnpV8K/"
+  }
+}
+
 load_dotenv()
 
 # 1. PRIMERO, defines la variable leyendo el archivo .env
@@ -2149,6 +2187,22 @@ class MessageReadStatusUpdate(BaseModel):
     message_ids: List[int]
     is_read: bool
 
+@app.get("/api/aboutus")
+async def get_about_us_data():
+    """
+    Devuelve los datos de la página "Nosotros" para el público general.
+    """
+    return about_us_data
+
+@app.get("/api/admin/aboutus")
+async def admin_get_about_us_data(
+    admin: User = Depends(get_current_admin_user) 
+):
+    """
+    Devuelve los datos de "Nosotros" para el panel de administración.
+    """
+    return about_us_data    
+
 @app.patch("/messages/read_status", status_code=status.HTTP_200_OK)
 async def update_message_read_status(
     read_status_update: MessageReadStatusUpdate,
@@ -2775,5 +2829,141 @@ async def get_users_who_blocked_user(
 
     # La relación 'blocked_by_users' (definida por backref) contiene la lista
     return user.blocked_by_users
+
+@app.put("/api/admin/aboutus")
+async def admin_update_about_us_data(
+    # --- Dependencia de Admin ---
+    admin: User = Depends(get_current_admin_user),
+    
+    # --- 1. Hero Section ---
+    hero_badge: str = Form(...),
+    hero_title: str = Form(...),
+    hero_paragraph: str = Form(...),
+    hero_btn1: str = Form(...),
+    hero_btn2: str = Form(...),
+    
+    # --- 2. Hero Cards (Textos) ---
+    heroCard_0_alt: str = Form(...),
+    heroCard_0_caption: str = Form(...),
+    heroCard_0_title: str = Form(...),
+    heroCard_1_alt: str = Form(...),
+    heroCard_1_caption: str = Form(...),
+    heroCard_1_title: str = Form(...),
+    heroCard_2_alt: str = Form(...),
+    heroCard_2_caption: str = Form(...),
+    heroCard_2_title: str = Form(...),
+    
+    # --- Hero Cards (Imágenes) ---
+    heroCard_0_image: Optional[UploadFile] = File(None),
+    heroCard_1_image: Optional[UploadFile] = File(None),
+    heroCard_2_image: Optional[UploadFile] = File(None),
+
+    # --- 3. About Section ---
+    about_title: str = Form(...),
+    about_paragraph: str = Form(...),
+    about_quote: str = Form(...),
+    
+    # --- 4. Tabs (Textos) ---
+    tab_0_paragraph: str = Form(...),
+    tab_0_quote: str = Form(...),
+    tab_0_list: str = Form(...),
+    tab_0_footer: str = Form(...),
+    tab_0_alt: str = Form(...),
+    tab_0_caption: str = Form(...),
+    
+    tab_1_paragraph: str = Form(...),
+    tab_1_quote: str = Form(...),
+    tab_1_list: str = Form(...),
+    tab_1_footer: str = Form(...),
+    tab_1_alt: str = Form(...),
+    tab_1_caption: str = Form(...),
+    
+    tab_2_paragraph: str = Form(...),
+    tab_2_quote: str = Form(...),
+    tab_2_list: str = Form(...),
+    tab_2_footer: str = Form(...),
+    tab_2_alt: str = Form(...),
+    tab_2_caption: str = Form(...),
+    
+    # --- Tabs (Imágenes) ---
+    tab_0_image: Optional[UploadFile] = File(None),
+    tab_1_image: Optional[UploadFile] = File(None),
+    tab_2_image: Optional[UploadFile] = File(None),
+    
+    # --- 5. Community Section ---
+    community_title: str = Form(...),
+    community_paragraph: str = Form(...),
+    community_btnText: str = Form(...),
+    community_link: str = Form(...),
+    
+    # --- 6. Social Section ---
+    social_insta: str = Form(...),
+    social_tiktok: str = Form(...),
+    social_facebook: str = Form(...)
+):
+    """
+    Actualiza el contenido de la página "Nosotros" con datos del formulario admin.
+    """
+    global about_us_data
+    
+    try:
+        # --- 1. Actualizar Hero ---
+        about_us_data["hero"] = {
+            "badge": hero_badge, "title": hero_title, "paragraph": hero_paragraph,
+            "btn1": hero_btn1, "btn2": hero_btn2
+        }
+        
+        # --- 2. Actualizar Hero Cards ---
+        hero_cards_data = [
+            {"alt": heroCard_0_alt, "caption": heroCard_0_caption, "title": heroCard_0_title},
+            {"alt": heroCard_1_alt, "caption": heroCard_1_caption, "title": heroCard_1_title},
+            {"alt": heroCard_2_alt, "caption": heroCard_2_caption, "title": heroCard_2_title}
+        ]
+        hero_card_images = [heroCard_0_image, heroCard_1_image, heroCard_2_image]
+        
+        for i, (data, img) in enumerate(zip(hero_cards_data, hero_card_images)):
+            about_us_data["heroCards"][i].update(data)
+            if img:
+                img_url = await save_upload_file(img)
+                if img_url:
+                    about_us_data["heroCards"][i]["imageUrl"] = img_url
+
+        # --- 3. Actualizar About ---
+        about_us_data["about"] = {
+            "title": about_title, "paragraph": about_paragraph, "quote": about_quote
+        }
+        
+        # --- 4. Actualizar Tabs ---
+        tabs_data = [
+            {"paragraph": tab_0_paragraph, "quote": tab_0_quote, "list": tab_0_list, "footer": tab_0_footer, "alt": tab_0_alt, "caption": tab_0_caption},
+            {"paragraph": tab_1_paragraph, "quote": tab_1_quote, "list": tab_1_list, "footer": tab_1_footer, "alt": tab_1_alt, "caption": tab_1_caption},
+            {"paragraph": tab_2_paragraph, "quote": tab_2_quote, "list": tab_2_list, "footer": tab_2_footer, "alt": tab_2_alt, "caption": tab_2_caption}
+        ]
+        tab_images = [tab_0_image, tab_1_image, tab_2_image]
+        
+        for i, (data, img) in enumerate(zip(tabs_data, tab_images)):
+            about_us_data["tabs"][i].update(data)
+            if img:
+                img_url = await save_upload_file(img)
+                if img_url:
+                    about_us_data["tabs"][i]["imageUrl"] = img_url
+        
+        # --- 5. Actualizar Community ---
+        about_us_data["community"] = {
+            "title": community_title, "paragraph": community_paragraph,
+            "btnText": community_btnText, "link": community_link
+        }
+        
+        # --- 6. Actualizar Social ---
+        about_us_data["social"] = {
+            "insta": social_insta, "tiktok": social_tiktok, "facebook": social_facebook
+        }
+        
+        # Devolver todos los datos actualizados
+        return about_us_data
+
+    except Exception as e:
+        print(f"Error al actualizar 'Nosotros': {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error al guardar los datos.")
 
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
