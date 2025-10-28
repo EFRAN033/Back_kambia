@@ -2654,8 +2654,6 @@ async def update_hero_data(
     """
     global hero_section_data # Necesario para modificar la variable global
 
-    # --- Procesamiento de Imágenes de Tarjetas ---
-    # Mantiene las URLs actuales como fallback si no se sube nueva imagen
     new_card_image_urls = [
         hero_section_data["cards"][0].get("imageUrl") if len(hero_section_data.get("cards", [])) > 0 else None,
         hero_section_data["cards"][1].get("imageUrl") if len(hero_section_data.get("cards", [])) > 1 else None,
@@ -2667,20 +2665,6 @@ async def update_hero_data(
     for i, image_file in enumerate(card_images_files):
         if image_file: # Si se subió un archivo para esta tarjeta
             try:
-                # --- Opcional: Lógica para borrar imagen antigua ---
-                # old_image_path = hero_section_data["cards"][i].get("imageUrl")
-                # # Evita borrar imágenes por defecto o rutas inválidas
-                # if old_image_path and old_image_path.startswith(f"/{UPLOAD_DIR}/"):
-                #     full_old_path = os.path.join(os.getcwd(), old_image_path.lstrip('/'))
-                #     if os.path.exists(full_old_path):
-                #         try:
-                #             os.remove(full_old_path)
-                #             print(f"Imagen anterior de tarjeta {i} eliminada: {full_old_path}")
-                #         except OSError as e:
-                #             print(f"Error al eliminar imagen anterior de tarjeta {i} ({full_old_path}): {e}")
-                # --- Fin Lógica Opcional ---
-
-                # Guardar la nueva imagen y obtener su URL web
                 new_url = await save_upload_file(image_file)
                 new_card_image_urls[i] = new_url # Actualizar la URL para esta tarjeta en nuestra lista temporal
                 print(f"Nueva imagen para tarjeta {i} guardada en: {new_url}")
