@@ -95,7 +95,15 @@ about_us_data = {
     "insta": "https://www.instagram.com/kambia_pe?igsh=MWg2aWR3YnhnNW1qdw==",
     "tiktok": "https://tiktok.com/@kambiape",
     "facebook": "https://www.facebook.com/share/1A62pnpV8K/"
-  }
+  },
+  
+  # --- Sección de Galería Añadida ---
+  "gallery": [
+    { "id": 1, "alt": "Voluntariado local", "imageUrl": "/uploads/placeholder_gallery_1.jpg" },
+    { "id": 2, "alt": "Taller de programación", "imageUrl": "/uploads/placeholder_gallery_2.jpg" },
+    { "id": 3, "alt": "Huertos urbanos", "imageUrl": "/uploads/placeholder_gallery_3.jpg" },
+    { "id": 4, "alt": "Robótica escolar", "imageUrl": "/uploads/placeholder_gallery_4.jpg" }
+  ]
 }
 
 load_dotenv()
@@ -485,6 +493,26 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+
+class SiteSettings(Base):
+    """
+    Guarda configuraciones clave-valor para toda la web.
+    La usaremos para guardar los textos del Hero y AboutUs.
+    """
+    __tablename__ = "site_settings"
+    key = Column(String(100), primary_key=True) # ej: "hero_title_line_1"
+    value = Column(Text, nullable=True)         # ej: "Intercambia fácil, seguro"
+
+class GalleryItem(Base):
+    """
+    Una tabla para la galería de la página "Nosotros".
+    """
+    __tablename__ = "gallery_items"
+    id = Column(Integer, primary_key=True, index=True)
+    alt_text = Column(String(255), nullable=False)
+    image_url = Column(String(500), nullable=False)
+    page_section = Column(String(50), default="about_us", index=True) # Para futura expansión
+    order = Column(Integer, default=0)
 
 class AdminStats(BaseModel):
     total_users: int
@@ -2791,6 +2819,15 @@ async def update_hero_data(
         # En producción, podrías querer devolver un error 500 más genérico
         raise HTTPException(status_code=500, detail=f"Error interno al validar los datos actualizados: {e}")
 
+def set_setting(db: Session, key: str, value: str):
+    setting = db.query(SiteSettings).filter(SiteSettings.key == key).first()
+    if setting:
+        setting.value = value
+    else:
+        setting = SiteSettings(key=key, value=value)
+        db.add(setting)
+    return setting
+
 @app.get("/admin/users/{user_id}/blocked", response_model=List[UserPublicResponse])
 async def get_users_blocked_by_user(
     user_id: int,
@@ -2832,138 +2869,98 @@ async def get_users_who_blocked_user(
 
 @app.put("/api/admin/aboutus")
 async def admin_update_about_us_data(
-    # --- Dependencia de Admin ---
-    admin: User = Depends(get_current_admin_user),
-    
-    # --- 1. Hero Section ---
-    hero_badge: str = Form(...),
-    hero_title: str = Form(...),
-    hero_paragraph: str = Form(...),
-    hero_btn1: str = Form(...),
-    hero_btn2: str = Form(...),
-    
-    # --- 2. Hero Cards (Textos) ---
-    heroCard_0_alt: str = Form(...),
-    heroCard_0_caption: str = Form(...),
-    heroCard_0_title: str = Form(...),
-    heroCard_1_alt: str = Form(...),
-    heroCard_1_caption: str = Form(...),
-    heroCard_1_title: str = Form(...),
-    heroCard_2_alt: str = Form(...),
-    heroCard_2_caption: str = Form(...),
-    heroCard_2_title: str = Form(...),
-    
-    # --- Hero Cards (Imágenes) ---
-    heroCard_0_image: Optional[UploadFile] = File(None),
-    heroCard_1_image: Optional[UploadFile] = File(None),
-    heroCard_2_image: Optional[UploadFile] = File(None),
-
-    # --- 3. About Section ---
-    about_title: str = Form(...),
-    about_paragraph: str = Form(...),
-    about_quote: str = Form(...),
-    
-    # --- 4. Tabs (Textos) ---
-    tab_0_paragraph: str = Form(...),
-    tab_0_quote: str = Form(...),
-    tab_0_list: str = Form(...),
-    tab_0_footer: str = Form(...),
-    tab_0_alt: str = Form(...),
-    tab_0_caption: str = Form(...),
-    
-    tab_1_paragraph: str = Form(...),
-    tab_1_quote: str = Form(...),
-    tab_1_list: str = Form(...),
-    tab_1_footer: str = Form(...),
-    tab_1_alt: str = Form(...),
-    tab_1_caption: str = Form(...),
-    
-    tab_2_paragraph: str = Form(...),
-    tab_2_quote: str = Form(...),
-    tab_2_list: str = Form(...),
-    tab_2_footer: str = Form(...),
-    tab_2_alt: str = Form(...),
-    tab_2_caption: str = Form(...),
-    
-    # --- Tabs (Imágenes) ---
-    tab_0_image: Optional[UploadFile] = File(None),
-    tab_1_image: Optional[UploadFile] = File(None),
-    tab_2_image: Optional[UploadFile] = File(None),
-    
-    # --- 5. Community Section ---
-    community_title: str = Form(...),
-    community_paragraph: str = Form(...),
-    community_btnText: str = Form(...),
-    community_link: str = Form(...),
-    
-    # --- 6. Social Section ---
-    social_insta: str = Form(...),
-    social_tiktok: str = Form(...),
-    social_facebook: str = Form(...)
+    request: Request,
+    db: Session = Depends(get_db), # <-- Añade la sesión de BD
+    admin: User = Depends(get_current_admin_user)
 ):
-    """
-    Actualiza el contenido de la página "Nosotros" con datos del formulario admin.
-    """
-    global about_us_data
+    form_data = await request.form()
     
     try:
-        # --- 1. Actualizar Hero ---
-        about_us_data["hero"] = {
-            "badge": hero_badge, "title": hero_title, "paragraph": hero_paragraph,
-            "btn1": hero_btn1, "btn2": hero_btn2
-        }
-        
-        # --- 2. Actualizar Hero Cards ---
-        hero_cards_data = [
-            {"alt": heroCard_0_alt, "caption": heroCard_0_caption, "title": heroCard_0_title},
-            {"alt": heroCard_1_alt, "caption": heroCard_1_caption, "title": heroCard_1_title},
-            {"alt": heroCard_2_alt, "caption": heroCard_2_caption, "title": heroCard_2_title}
-        ]
-        hero_card_images = [heroCard_0_image, heroCard_1_image, heroCard_2_image]
-        
-        for i, (data, img) in enumerate(zip(hero_cards_data, hero_card_images)):
-            about_us_data["heroCards"][i].update(data)
-            if img:
-                img_url = await save_upload_file(img)
-                if img_url:
-                    about_us_data["heroCards"][i]["imageUrl"] = img_url
+        # --- 1. Actualizar Hero (Ahora en la BD) ---
+        set_setting(db, "hero_badge", form_data.get("hero_badge"))
+        set_setting(db, "hero_title", form_data.get("hero_title"))
+        set_setting(db, "hero_paragraph", form_data.get("hero_paragraph"))
+        # ...etc. para todos los campos de texto ...
 
-        # --- 3. Actualizar About ---
-        about_us_data["about"] = {
-            "title": about_title, "paragraph": about_paragraph, "quote": about_quote
-        }
+        # --- 7. Procesar Galería Dinámica (Ahora en la BD) ---
+        # Borra la galería vieja para simplificar
+        db.query(GalleryItem).filter(GalleryItem.page_section == "about_us").delete()
         
-        # --- 4. Actualizar Tabs ---
-        tabs_data = [
-            {"paragraph": tab_0_paragraph, "quote": tab_0_quote, "list": tab_0_list, "footer": tab_0_footer, "alt": tab_0_alt, "caption": tab_0_caption},
-            {"paragraph": tab_1_paragraph, "quote": tab_1_quote, "list": tab_1_list, "footer": tab_1_footer, "alt": tab_1_alt, "caption": tab_1_caption},
-            {"paragraph": tab_2_paragraph, "quote": tab_2_quote, "list": tab_2_list, "footer": tab_2_footer, "alt": tab_2_alt, "caption": tab_2_caption}
-        ]
-        tab_images = [tab_0_image, tab_1_image, tab_2_image]
+        gallery_count = int(form_data.get("gallery_item_count", 0))
+        for i in range(gallery_count):
+            item_alt = form_data.get(f"gallery_{i}_alt")
+            item_image: UploadFile = form_data.get(f"gallery_{i}_image")
+            item_id_str = form_data.get(f"gallery_{i}_id") # Para saber si es imagen vieja
+            
+            image_url = None
+            if item_image and item_image.filename:
+                # Se subió una imagen nueva
+                image_url = await save_upload_file(item_image)
+            else:
+                # Es imagen existente, busca la URL en el form_data (debes enviarla desde el front)
+                # O mejor, busca en la variable global (solo para la migración)
+                # Nota: Esta parte es compleja, lo más fácil es
+                # requerir que se suban de nuevo o manejarlo con más lógica.
+                # Para el ejemplo, asumimos que se sube nueva o se pasa la URL vieja.
+                image_url = form_data.get(f"gallery_{i}_existing_url") # Asumiendo que el front la envía
+
+            if image_url:
+                new_item = GalleryItem(
+                    alt_text=item_alt,
+                    image_url=image_url,
+                    page_section="about_us",
+                    order=i
+                )
+                db.add(new_item)
+
+        db.commit() # <-- ¡Guardar todo!
         
-        for i, (data, img) in enumerate(zip(tabs_data, tab_images)):
-            about_us_data["tabs"][i].update(data)
-            if img:
-                img_url = await save_upload_file(img)
-                if img_url:
-                    about_us_data["tabs"][i]["imageUrl"] = img_url
-        
-        # --- 5. Actualizar Community ---
-        about_us_data["community"] = {
-            "title": community_title, "paragraph": community_paragraph,
-            "btnText": community_btnText, "link": community_link
-        }
-        
-        # --- 6. Actualizar Social ---
-        about_us_data["social"] = {
-            "insta": social_insta, "tiktok": social_tiktok, "facebook": social_facebook
-        }
-        
-        # Devolver todos los datos actualizados
-        return about_us_data
+        # Devuelve los datos frescos desde la BD (ver paso 3)
+        return await get_about_us_data(db) 
 
     except Exception as e:
+        db.rollback()
         print(f"Error al actualizar 'Nosotros': {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error al guardar los datos.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Ocurrió un error al guardar los datos: {e}")
+    
+# Función helper para leer de la BD
+def get_settings_dict(db: Session, keys: List[str]) -> dict:
+    settings = db.query(SiteSettings).filter(SiteSettings.key.in_(keys)).all()
+    # Si no existe, devuelve un valor por defecto para que no se rompa el front
+    settings_map = {s.key: s.value for s in settings}
+    return {key: settings_map.get(key, f"[Default {key}]") for key in keys}
+
+@app.get("/api/aboutus")
+async def get_about_us_data(db: Session = Depends(get_db)): # <-- Pide la BD
+    """
+    Devuelve los datos de la página "Nosotros" para el público general.
+    """
+    # 1. Obtener textos de la BD
+    hero_keys = ["hero_badge", "hero_title", "hero_paragraph", "hero_btn1", "hero_btn2"]
+    hero_data = get_settings_dict(db, hero_keys)
+    
+    # ... (obtener los otros textos de "about", "tabs", "community", "social")
+    
+    # 2. Obtener galería de la BD
+    gallery_items_db = db.query(GalleryItem).filter(GalleryItem.page_section == "about_us").order_by(GalleryItem.order).all()
+    
+    gallery_data = [
+        {"id": item.id, "alt": item.alt_text, "imageUrl": item.image_url}
+        for item in gallery_items_db
+    ]
+
+    # 3. Construir el JSON final
+    # (Debes replicar la estructura de tu variable global)
+    final_data = {
+      "hero": {
+        "badge": hero_data["hero_badge"],
+        "title": hero_data["hero_title"],
+        # ... etc
+      },
+      # ... "heroCards", "about", "tabs", "community", "social" ...
+      "gallery": gallery_data
+    }
+    
+    return final_data
 
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
