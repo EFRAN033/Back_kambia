@@ -2770,21 +2770,6 @@ async def get_users_who_blocked_user(
     return user.blocked_by_users
 
 
-def set_setting(db: Session, key: str, value: str):
-    """
-    Guarda o actualiza una configuración en la tabla SiteSettings.
-    """
-    if value is None: # No guardar valores nulos
-        return None
-        
-    setting = db.query(SiteSettings).filter(SiteSettings.key == key).first()
-    if setting:
-        setting.value = value
-    else:
-        setting = SiteSettings(key=key, value=value)
-        db.add(setting)
-    return setting
-
 # Función helper para leer de la BD
 def get_settings_dict(db: Session, keys: List[str]) -> dict:
     """
