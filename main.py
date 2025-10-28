@@ -2624,88 +2624,87 @@ async def get_user_proposals_history(
 
 # 3. Endpoint de ADMIN para ACTUALIZAR datos del Hero (para HeroSection-admin.vue)
 @app.put("/api/admin/hero", response_model=HeroData)
-async def update_hero_data(
-    # Textos generales (como antes)
+async def update_hero_data_in_db(
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user),
+    # Textos generales
     titleLine1: str = Form(...),
     titleLine2: str = Form(...),
     badgeText: str = Form(...),
     paragraphText: str = Form(...),
     button1Text: str = Form(...),
     button2Text: str = Form(...),
-
-    # Textos de las tarjetas (recibidos con índice)
+    # Textos de las tarjetas
     card_0_alt: str = Form(...),
     card_0_badge: str = Form(...),
     card_1_alt: str = Form(...),
     card_1_badge: str = Form(...),
     card_2_alt: str = Form(...),
     card_2_badge: str = Form(...),
-
-    # Imágenes opcionales de las tarjetas (recibidas con índice)
+    # Imágenes opcionales de las tarjetas
     card_0_image: Optional[UploadFile] = File(None),
     card_1_image: Optional[UploadFile] = File(None),
-    card_2_image: Optional[UploadFile] = File(None),
-
-    admin: User = Depends(get_current_admin_user) # Asegura que solo admin pueda hacer esto
+    card_2_image: Optional[UploadFile] = File(None)
 ):
     """
-    Actualiza todos los textos y las imágenes (opcionales) del Hero Section,
-    incluyendo las 3 tarjetas rotativas.
+    Actualiza los datos del Hero Section directamente en la base de datos.
     """
-    global hero_section_data # Necesario para modificar la variable global
-
-    new_card_image_urls = [
-        hero_section_data["cards"][0].get("imageUrl") if len(hero_section_data.get("cards", [])) > 0 else None,
-        hero_section_data["cards"][1].get("imageUrl") if len(hero_section_data.get("cards", [])) > 1 else None,
-        hero_section_data["cards"][2].get("imageUrl") if len(hero_section_data.get("cards", [])) > 2 else None
-    ]
-    # Lista de archivos subidos
-    card_images_files = [card_0_image, card_1_image, card_2_image]
-
-    for i, image_file in enumerate(card_images_files):
-        if image_file: # Si se subió un archivo para esta tarjeta
-            try:
-                new_url = await save_upload_file(image_file)
-                new_card_image_urls[i] = new_url # Actualizar la URL para esta tarjeta en nuestra lista temporal
-                print(f"Nueva imagen para tarjeta {i} guardada en: {new_url}")
-
-            except Exception as e:
-                # Si falla el guardado de una imagen, registrar y devolver error
-                print(f"Error crítico al procesar imagen para tarjeta {i}: {e}")
-                # Puedes decidir si continuar con las otras o fallar todo
-                raise HTTPException(status_code=500, detail=f"Error interno al guardar la imagen para la tarjeta {i+1}.")
-
-    # --- Actualización de Datos Globales ---
-    # Actualizar textos generales
-    hero_section_data["titleLine1"] = titleLine1
-    hero_section_data["titleLine2"] = titleLine2
-    hero_section_data["badgeText"] = badgeText
-    hero_section_data["paragraphText"] = paragraphText
-    hero_section_data["button1Text"] = button1Text
-    hero_section_data["button2Text"] = button2Text
-
-    # Actualizar la lista de tarjetas con los nuevos textos y las URLs de imagen procesadas
-    hero_section_data["cards"] = [
-        # Usamos los IDs fijos 1, 2, 3 o podríamos generarlos si fuera necesario
-        {"id": 1, "alt": card_0_alt, "badge": card_0_badge, "imageUrl": new_card_image_urls[0]},
-        {"id": 2, "alt": card_1_alt, "badge": card_1_badge, "imageUrl": new_card_image_urls[1]},
-        {"id": 3, "alt": card_2_alt, "badge": card_2_badge, "imageUrl": new_card_image_urls[2]},
-    ]
-
-    print("Datos completos del Hero actualizados:", hero_section_data) # Log para depuración
-
-    # --- Validación y Respuesta ---
-    # Validar que la estructura final coincida con el modelo Pydantic HeroData
     try:
-        validated_data = HeroData(**hero_section_data)
-        # Devolver el objeto validado (Pydantic lo convierte a JSON)
-        return validated_data
-    except Exception as e: # Captura errores de validación Pydantic (ej. si falta un campo)
-        print(f"Error de validación Pydantic al preparar la respuesta: {e}")
-        # En producción, podrías querer devolver un error 500 más genérico
-        raise HTTPException(status_code=500, detail=f"Error interno al validar los datos actualizados: {e}")
+        # Guardar textos generales
+        set_setting(db, "hero_titleLine1", titleLine1)
+        set_setting(db, "hero_titleLine2", titleLine2)
+        set_setting(db, "hero_badgeText", badgeText)
+        set_setting(db, "hero_paragraphText", paragraphText)
+        set_setting(db, "hero_button1Text", button1Text)
+        set_setting(db, "hero_button2Text", button2Text)
 
-def set_setting(db: Session, key: str, value: str):
+        # Guardar textos de tarjetas
+        card_texts = {
+            "hero_card_0_alt": card_0_alt, "hero_card_0_badge": card_0_badge,
+            "hero_card_1_alt": card_1_alt, "hero_card_1_badge": card_1_badge,
+            "hero_card_2_alt": card_2_alt, "hero_card_2_badge": card_2_badge,
+        }
+        for key, value in card_texts.items():
+            set_setting(db, key, value)
+
+        # Procesar y guardar imágenes si se subieron
+        card_images = {
+            "hero_card_0_imageUrl": card_0_image,
+            "hero_card_1_imageUrl": card_1_image,
+            "hero_card_2_imageUrl": card_2_image,
+        }
+        
+        # Obtener las URLs existentes por si no se sube una nueva imagen
+        existing_urls = {
+            "hero_card_0_imageUrl": db.query(SiteSettings).filter(SiteSettings.key == "hero_card_0_imageUrl").first(),
+            "hero_card_1_imageUrl": db.query(SiteSettings).filter(SiteSettings.key == "hero_card_1_imageUrl").first(),
+            "hero_card_2_imageUrl": db.query(SiteSettings).filter(SiteSettings.key == "hero_card_2_imageUrl").first(),
+        }
+
+        for key, image_file in card_images.items():
+            if image_file and image_file.filename:
+                # Si se sube una imagen nueva, guárdala
+                image_url = await save_upload_file(image_file)
+                set_setting(db, key, image_url)
+            elif existing_urls.get(key) is None:
+                # Si no se sube imagen Y no había ninguna antes, ponlo en None (o string vacío)
+                set_setting(db, key, None)
+            # Si no se sube imagen pero ya existía una (existing_urls.get(key) no es None),
+            # simplemente no hacemos nada y dejamos el valor que ya estaba en la BD.
+
+        db.commit()
+
+    except Exception as e:
+        db.rollback()
+        print(f"Error al guardar los datos del Hero: {e}")
+        raise HTTPException(status_code=500, detail=f"Error al guardar los datos del Hero: {e}")
+
+    # Devolver los datos actualizados desde la BD para confirmar
+    return await get_hero_data(db)
+
+
+# --- 3. ASEGÚRATE de que esta función (que me diste) esté en tu main.py ---
+def set_setting(db: Session, key: str, value: Optional[str]): # Permitir que value sea None
     setting = db.query(SiteSettings).filter(SiteSettings.key == key).first()
     if setting:
         setting.value = value
@@ -2713,6 +2712,39 @@ def set_setting(db: Session, key: str, value: str):
         setting = SiteSettings(key=key, value=value)
         db.add(setting)
     return setting
+
+@app.get("/api/hero", response_model=HeroData)
+async def get_hero_data(db: Session = Depends(get_db)):
+    """
+    Devuelve los datos del Hero Section para el público, leyendo desde la base de datos.
+    """
+    # 1. Definir todas las claves que necesitamos para el Hero
+    keys = [
+        "hero_titleLine1", "hero_titleLine2", "hero_badgeText",
+        "hero_paragraphText", "hero_button1Text", "hero_button2Text",
+        "hero_card_0_alt", "hero_card_0_badge", "hero_card_0_imageUrl",
+        "hero_card_1_alt", "hero_card_1_badge", "hero_card_1_imageUrl",
+        "hero_card_2_alt", "hero_card_2_badge", "hero_card_2_imageUrl",
+    ]
+
+    # 2. Obtener todos los valores de la BD con una sola consulta
+    settings = get_settings_dict(db, keys)
+
+    # 3. Construir la respuesta en el formato que el frontend espera
+    hero_response = HeroData(
+        titleLine1=settings.get("hero_titleLine1", "Intercambia fácil, seguro"),
+        titleLine2=settings.get("hero_titleLine2", "y sin comisiones"),
+        badgeText=settings.get("hero_badgeText", "Bienvenido a KambiaPe"),
+        paragraphText=settings.get("hero_paragraphText", "Publica lo que ya no usas y encuentra lo que necesitas."),
+        button1Text=settings.get("hero_button1Text", "Publicar objeto"),
+        button2Text=settings.get("hero_button2Text", "Buzón"),
+        cards=[
+            HeroCard(id=1, alt=settings.get("hero_card_0_alt"), badge=settings.get("hero_card_0_badge"), imageUrl=settings.get("hero_card_0_imageUrl")),
+            HeroCard(id=2, alt=settings.get("hero_card_1_alt"), badge=settings.get("hero_card_1_badge"), imageUrl=settings.get("hero_card_1_imageUrl")),
+            HeroCard(id=3, alt=settings.get("hero_card_2_alt"), badge=settings.get("hero_card_2_badge"), imageUrl=settings.get("hero_card_2_imageUrl")),
+        ]
+    )
+    return hero_response
 
 @app.get("/admin/users/{user_id}/blocked", response_model=List[UserPublicResponse])
 async def get_users_blocked_by_user(
