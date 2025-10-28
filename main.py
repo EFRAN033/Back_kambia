@@ -28,83 +28,6 @@ from sqlalchemy.orm import joinedload
 import requests
 import re
 
-hero_section_data = {
-    # Textos generales (como los tenías)
-    "titleLine1": "Intercambia fácil, seguro",
-    "titleLine2": "y sin comisiones",
-    "badgeText": "Bienvenido a KambiaPe",
-    "paragraphText": "Publica lo que ya no usas y encuentra lo que necesitas en tu comunidad.",
-    "button1Text": "Publicar objeto",
-    "button2Text": "Buzón",
-
-    # Lista de tarjetas con valores por defecto
-    "cards": [
-        {
-            "id": 1,
-            "alt": "Cámara",
-            "badge": "Destacado",
-            # Usa rutas relativas si las imágenes están en /uploaded_images/ o None si no hay default
-            "imageUrl": "/src/assets/imagenes/gif/Animacion_Mesa de trabajo 1-01.png" # O None
-        },
-        {
-            "id": 2,
-            "alt": "Mochila",
-            "badge": "Outdoor",
-            "imageUrl": "/src/assets/imagenes/gif/Animacion_Mesa de trabajo 1-02.png" # O None
-        },
-        {
-            "id": 3,
-            "alt": "Teclado",
-            "badge": "Gaming",
-            "imageUrl": "/src/assets/imagenes/gif/Animacion_Mesa de trabajo 1-03.png" # O None
-        }
-    ]
-}
-
-# --- Datos para la página "Nosotros" ---
-about_us_data = {
-  "hero": {
-    "badge": "Perú • Comunidad • Innovación",
-    "title": "Ideas en acción.",
-    "paragraph": "KambiaPe conecta personas para transformar barrios, escuelas y emprendimientos. Simple, local, real.",
-    "btn1": "Conoce la historia",
-    "btn2": "Conócenos!"
-  },
-  "heroCards": [
-    { "id": 1, "alt": "Mentoría STEAM en colegio público", "caption": "Educación", "title": "Escuelas que inspiran", "imageUrl": "/uploads/placeholder1.jpg" },
-    { "id": 2, "alt": "Reciclaje y compostaje comunitario", "caption": "Sostenibilidad", "title": "Rutas verdes", "imageUrl": "/uploads/placeholder2.jpg" },
-    { "id": 3, "alt": "Emprendimiento local y comercio digital", "caption": "Emprendimiento", "title": "Impulso emprendedor", "imageUrl": "/uploads/placeholder3.jpg" }
-  ],
-  "about": {
-    "title": "Trueque con propósito.",
-    "paragraph": "Creamos puentes entre personas y barrios para que el intercambio vuelva a ser cotidiano, justo y medible.",
-    "quote": "Intercambiar es confiar y co-crear."
-  },
-  "tabs": [
-    { "id": 1, "type": "Qué es", "paragraph": "Una red donde productos, servicios y conocimientos se intercambian con reglas claras, reputación visible y mediación. Tecnología al servicio de la confianza local.", "quote": "Lo digital acerca, la comunidad decide.", "list": "", "footer": "", "alt": "Personas colaborando", "caption": "Colaboración", "imageUrl": "/uploads/placeholder4.jpg" },
-    { "id": 2, "type": "Misión", "paragraph": "Facilitar el intercambio justo entre personas mediante una plataforma confiable, segura y usable, con foco en impacto local.", "quote": "", "list": "Reglas claras y reputación pública.\nInclusión económica en barrios y escuelas.\nMenos desperdicio a través de la reutilización.", "footer": "", "alt": "Huertos urbanos", "caption": "Reutilización", "imageUrl": "/uploads/placeholder5.jpg" },
-    { "id": 3, "type": "Visión", "paragraph": "Liderar el intercambio solidario en Perú con una economía colaborativa y sostenible, conectando comunidades a nivel nacional a través de alianzas locales y tecnología centrada en las personas.", "quote": "", "list": "", "footer": "Alianzas con municipios y escuelas, embajadores locales y un motor de matching...", "alt": "Robótica y formación", "caption": "Formación", "imageUrl": "/uploads/placeholder6.jpg" }
-  ],
-  "community": {
-    "title": "El corazón de KambiaPe es su gente.",
-    "paragraph": "Únete a nuestra comunidad en WhatsApp para conectar, compartir ideas y ser el primero en enterarte de las novedades.",
-    "btnText": "Unirme a la Comunidad",
-    "link": "https://chat.whatsapp.com/Kekd3xJZtet8J6TLhTGFDQ?mode=ems_wa_t"
-  },
-  "social": {
-    "insta": "https://www.instagram.com/kambia_pe?igsh=MWg2aWR3YnhnNW1qdw==",
-    "tiktok": "https://tiktok.com/@kambiape",
-    "facebook": "https://www.facebook.com/share/1A62pnpV8K/"
-  },
-  
-  # --- Sección de Galería Añadida ---
-  "gallery": [
-    { "id": 1, "alt": "Voluntariado local", "imageUrl": "/uploads/placeholder_gallery_1.jpg" },
-    { "id": 2, "alt": "Taller de programación", "imageUrl": "/uploads/placeholder_gallery_2.jpg" },
-    { "id": 3, "alt": "Huertos urbanos", "imageUrl": "/uploads/placeholder_gallery_3.jpg" },
-    { "id": 4, "alt": "Robótica escolar", "imageUrl": "/uploads/placeholder_gallery_4.jpg" }
-  ]
-}
 
 load_dotenv()
 
@@ -2215,21 +2138,6 @@ class MessageReadStatusUpdate(BaseModel):
     message_ids: List[int]
     is_read: bool
 
-@app.get("/api/aboutus")
-async def get_about_us_data():
-    """
-    Devuelve los datos de la página "Nosotros" para el público general.
-    """
-    return about_us_data
-
-@app.get("/api/admin/aboutus")
-async def admin_get_about_us_data(
-    admin: User = Depends(get_current_admin_user) 
-):
-    """
-    Devuelve los datos de "Nosotros" para el panel de administración.
-    """
-    return about_us_data    
 
 @app.patch("/messages/read_status", status_code=status.HTTP_200_OK)
 async def update_message_read_status(
@@ -2711,14 +2619,8 @@ async def get_user_proposals_history(
     
     return proposals
     
-@app.get("/api/hero", response_model=HeroData)
-async def get_hero_data():
-    return hero_section_data
 
-# 2. Endpoint de ADMIN para obtener datos del Hero (para HeroSection-admin.vue)
-@app.get("/api/admin/hero", response_model=HeroData)
-async def get_admin_hero_data(admin: User = Depends(get_current_admin_user)):
-    return hero_section_data
+
 
 # 3. Endpoint de ADMIN para ACTUALIZAR datos del Hero (para HeroSection-admin.vue)
 @app.put("/api/admin/hero", response_model=HeroData)
@@ -2867,44 +2769,123 @@ async def get_users_who_blocked_user(
     # La relación 'blocked_by_users' (definida por backref) contiene la lista
     return user.blocked_by_users
 
+
+def set_setting(db: Session, key: str, value: str):
+    """
+    Guarda o actualiza una configuración en la tabla SiteSettings.
+    """
+    if value is None: # No guardar valores nulos
+        return None
+        
+    setting = db.query(SiteSettings).filter(SiteSettings.key == key).first()
+    if setting:
+        setting.value = value
+    else:
+        setting = SiteSettings(key=key, value=value)
+        db.add(setting)
+    return setting
+
+# Función helper para leer de la BD
+def get_settings_dict(db: Session, keys: List[str]) -> dict:
+    """
+    Obtiene un diccionario de configuraciones desde la BD.
+    """
+    settings = db.query(SiteSettings).filter(SiteSettings.key.in_(keys)).all()
+    # Si no existe, devuelve un string vacío para no romper el front
+    settings_map = {s.key: s.value for s in settings}
+    return {key: settings_map.get(key, "") for key in keys}
+
 @app.put("/api/admin/aboutus")
 async def admin_update_about_us_data(
     request: Request,
-    db: Session = Depends(get_db), # <-- Añade la sesión de BD
+    db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin_user)
 ):
+    """
+    Endpoint de ADMIN para actualizar TODA la página "Nosotros" en la BD.
+    """
     form_data = await request.form()
     
     try:
-        # --- 1. Actualizar Hero (Ahora en la BD) ---
+        # --- 1. Actualizar Hero ---
         set_setting(db, "hero_badge", form_data.get("hero_badge"))
         set_setting(db, "hero_title", form_data.get("hero_title"))
         set_setting(db, "hero_paragraph", form_data.get("hero_paragraph"))
-        # ...etc. para todos los campos de texto ...
+        set_setting(db, "hero_btn1", form_data.get("hero_btn1"))
+        set_setting(db, "hero_btn2", form_data.get("hero_btn2"))
 
-        # --- 7. Procesar Galería Dinámica (Ahora en la BD) ---
-        # Borra la galería vieja para simplificar
+        # --- 2. Actualizar Hero Cards (Loop Fijo de 3) ---
+        for i in range(3):
+            set_setting(db, f"heroCard_{i}_alt", form_data.get(f"heroCard_{i}_alt"))
+            set_setting(db, f"heroCard_{i}_caption", form_data.get(f"heroCard_{i}_caption"))
+            set_setting(db, f"heroCard_{i}_title", form_data.get(f"heroCard_{i}_title"))
+            
+            # Manejar la imagen de Hero Card
+            img: UploadFile = form_data.get(f"heroCard_{i}_image")
+            if img and img.filename:
+                img_url = await save_upload_file(img)
+                set_setting(db, f"heroCard_{i}_imageUrl", img_url)
+            else:
+                # Si no se subió una nueva, mantener la URL existente
+                # (El frontend debe enviar la URL existente en 'heroCard_{i}_existing_url')
+                existing_url = form_data.get(f"heroCard_{i}_existing_url")
+                if existing_url:
+                     set_setting(db, f"heroCard_{i}_imageUrl", existing_url)
+
+
+        # --- 3. Actualizar About ---
+        set_setting(db, "about_title", form_data.get("about_title"))
+        set_setting(db, "about_paragraph", form_data.get("about_paragraph"))
+        set_setting(db, "about_quote", form_data.get("about_quote"))
+        
+        # --- 4. Actualizar Tabs (Loop Fijo de 3) ---
+        for i in range(3):
+            set_setting(db, f"tab_{i}_paragraph", form_data.get(f"tab_{i}_paragraph"))
+            set_setting(db, f"tab_{i}_quote", form_data.get(f"tab_{i}_quote"))
+            set_setting(db, f"tab_{i}_list", form_data.get(f"tab_{i}_list"))
+            set_setting(db, f"tab_{i}_footer", form_data.get(f"tab_{i}_footer"))
+            set_setting(db, f"tab_{i}_alt", form_data.get(f"tab_{i}_alt"))
+            set_setting(db, f"tab_{i}_caption", form_data.get(f"tab_{i}_caption"))
+            
+            # Manejar la imagen de Tab
+            img: UploadFile = form_data.get(f"tab_{i}_image")
+            if img and img.filename:
+                img_url = await save_upload_file(img)
+                set_setting(db, f"tab_{i}_imageUrl", img_url)
+            else:
+                existing_url = form_data.get(f"tab_{i}_existing_url")
+                if existing_url:
+                    set_setting(db, f"tab_{i}_imageUrl", existing_url)
+
+        # --- 5. Actualizar Community ---
+        set_setting(db, "community_title", form_data.get("community_title"))
+        set_setting(db, "community_paragraph", form_data.get("community_paragraph"))
+        set_setting(db, "community_btnText", form_data.get("community_btnText"))
+        set_setting(db, "community_link", form_data.get("community_link"))
+        
+        # --- 6. Actualizar Social ---
+        set_setting(db, "social_insta", form_data.get("social_insta"))
+        set_setting(db, "social_tiktok", form_data.get("social_tiktok"))
+        set_setting(db, "social_facebook", form_data.get("social_facebook"))
+
+        # --- 7. Procesar Galería Dinámica (Tabla GalleryItem) ---
+        # Borra la galería vieja para simplificar y reconstruirla
         db.query(GalleryItem).filter(GalleryItem.page_section == "about_us").delete()
         
         gallery_count = int(form_data.get("gallery_item_count", 0))
         for i in range(gallery_count):
             item_alt = form_data.get(f"gallery_{i}_alt")
             item_image: UploadFile = form_data.get(f"gallery_{i}_image")
-            item_id_str = form_data.get(f"gallery_{i}_id") # Para saber si es imagen vieja
             
             image_url = None
             if item_image and item_image.filename:
                 # Se subió una imagen nueva
                 image_url = await save_upload_file(item_image)
             else:
-                # Es imagen existente, busca la URL en el form_data (debes enviarla desde el front)
-                # O mejor, busca en la variable global (solo para la migración)
-                # Nota: Esta parte es compleja, lo más fácil es
-                # requerir que se suban de nuevo o manejarlo con más lógica.
-                # Para el ejemplo, asumimos que se sube nueva o se pasa la URL vieja.
-                image_url = form_data.get(f"gallery_{i}_existing_url") # Asumiendo que el front la envía
+                # Es imagen existente, el front debe enviarla en este campo
+                image_url = form_data.get(f"gallery_{i}_existing_url")
 
-            if image_url:
+            if image_url and item_alt:
                 new_item = GalleryItem(
                     alt_text=item_alt,
                     image_url=image_url,
@@ -2912,24 +2893,95 @@ async def admin_update_about_us_data(
                     order=i
                 )
                 db.add(new_item)
-
+            
         db.commit() # <-- ¡Guardar todo!
         
-        # Devuelve los datos frescos desde la BD (ver paso 3)
+        # Devuelve los datos frescos desde la BD
         return await get_about_us_data(db) 
 
     except Exception as e:
         db.rollback()
         print(f"Error al actualizar 'Nosotros': {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Ocurrió un error al guardar los datos: {e}")
-    
-# Función helper para leer de la BD
-def get_settings_dict(db: Session, keys: List[str]) -> dict:
-    settings = db.query(SiteSettings).filter(SiteSettings.key.in_(keys)).all()
-    # Si no existe, devuelve un valor por defecto para que no se rompa el front
-    settings_map = {s.key: s.value for s in settings}
-    return {key: settings_map.get(key, f"[Default {key}]") for key in keys}
 
+@app.get("/api/aboutus")
+async def get_about_us_data(db: Session = Depends(get_db)): # <-- Pide la BD
+    """
+    Devuelve los datos de la página "Nosotros" para el público general,
+    leyendo desde la base de datos.
+    """
+    
+    # 1. Definir todas las claves de texto que necesitamos
+    all_keys = [
+        # Hero
+        "hero_badge", "hero_title", "hero_paragraph", "hero_btn1", "hero_btn2",
+        # Hero Cards (3)
+        "heroCard_0_alt", "heroCard_0_caption", "heroCard_0_title", "heroCard_0_imageUrl",
+        "heroCard_1_alt", "heroCard_1_caption", "heroCard_1_title", "heroCard_1_imageUrl",
+        "heroCard_2_alt", "heroCard_2_caption", "heroCard_2_title", "heroCard_2_imageUrl",
+        # About
+        "about_title", "about_paragraph", "about_quote",
+        # Tabs (3)
+        "tab_0_paragraph", "tab_0_quote", "tab_0_list", "tab_0_footer", "tab_0_alt", "tab_0_caption", "tab_0_imageUrl",
+        "tab_1_paragraph", "tab_1_quote", "tab_1_list", "tab_1_footer", "tab_1_alt", "tab_1_caption", "tab_1_imageUrl",
+        "tab_2_paragraph", "tab_2_quote", "tab_2_list", "tab_2_footer", "tab_2_alt", "tab_2_caption", "tab_2_imageUrl",
+        # Community
+        "community_title", "community_paragraph", "community_btnText", "community_link",
+        # Social
+        "social_insta", "social_tiktok", "social_facebook"
+    ]
+    
+    # 2. Obtener todos los textos de la BD en una sola consulta
+    data = get_settings_dict(db, all_keys)
+    
+    # 3. Obtener galería de la BD (tabla separada)
+    gallery_items_db = db.query(GalleryItem).filter(GalleryItem.page_section == "about_us").order_by(GalleryItem.order).all()
+    gallery_data = [
+        {"id": item.id, "alt": item.alt_text, "imageUrl": item.image_url}
+        for item in gallery_items_db
+    ]
+
+    # 4. Construir el JSON final (replicando la estructura original)
+    final_data = {
+      "hero": {
+        "badge": data["hero_badge"],
+        "title": data["hero_title"],
+        "paragraph": data["hero_paragraph"],
+        "btn1": data["hero_btn1"],
+        "btn2": data["hero_btn2"]
+      },
+      "heroCards": [
+        { "id": 1, "alt": data["heroCard_0_alt"], "caption": data["heroCard_0_caption"], "title": data["heroCard_0_title"], "imageUrl": data["heroCard_0_imageUrl"] },
+        { "id": 2, "alt": data["heroCard_1_alt"], "caption": data["heroCard_1_caption"], "title": data["heroCard_1_title"], "imageUrl": data["heroCard_1_imageUrl"] },
+        { "id": 3, "alt": data["heroCard_2_alt"], "caption": data["heroCard_2_caption"], "title": data["heroCard_2_title"], "imageUrl": data["heroCard_2_imageUrl"] }
+      ],
+      "about": {
+        "title": data["about_title"],
+        "paragraph": data["about_paragraph"],
+        "quote": data["about_quote"]
+      },
+      "tabs": [
+        { "id": 1, "type": "Qué es", "paragraph": data["tab_0_paragraph"], "quote": data["tab_0_quote"], "list": data["tab_0_list"], "footer": data["tab_0_footer"], "alt": data["tab_0_alt"], "caption": data["tab_0_caption"], "imageUrl": data["tab_0_imageUrl"] },
+        { "id": 2, "type": "Misión", "paragraph": data["tab_1_paragraph"], "quote": data["tab_1_quote"], "list": data["tab_1_list"], "footer": data["tab_1_footer"], "alt": data["tab_1_alt"], "caption": data["tab_1_caption"], "imageUrl": data["tab_1_imageUrl"] },
+        { "id": 3, "type": "Visión", "paragraph": data["tab_2_paragraph"], "quote": data["tab_2_quote"], "list": data["tab_2_list"], "footer": data["tab_2_footer"], "alt": data["tab_2_alt"], "caption": data["tab_2_caption"], "imageUrl": data["tab_2_imageUrl"] }
+      ],
+      "community": {
+        "title": data["community_title"],
+        "paragraph": data["community_paragraph"],
+        "btnText": data["community_btnText"],
+        "link": data["community_link"]
+      },
+      "social": {
+        "insta": data["social_insta"],
+        "tiktok": data["social_tiktok"],
+        "facebook": data["social_facebook"]
+      },
+      "gallery": gallery_data
+    }
+    
+    return final_data
+
+# --- FIN DEL CÓDIGO COMPLETO ---
 @app.get("/api/aboutus")
 async def get_about_us_data(db: Session = Depends(get_db)): # <-- Pide la BD
     """
