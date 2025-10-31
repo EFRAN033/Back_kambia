@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, joinedload
 import os
+from datetime import date, timedelta
 from dotenv import load_dotenv
 from typing import List, Optional, Dict, Literal, Set
 from passlib.context import CryptContext
@@ -634,12 +635,25 @@ class ProductPublicResponse(BaseModel): # Un modelo más ligero para productos e
         from_attributes = True
 
 class ChartDataPoint(BaseModel):
-    label: str  # La etiqueta del eje X (ej. '2023-10-27' o '2023-W43')
-    count: int  # El valor del eje Y
+    label: str  
+    count: int 
 
 class ChartDataResponse(BaseModel):
     labels: List[str]
     datasets: List[Dict[str, object]]
+
+class AdminStatsResponse(BaseModel):
+    total_users: int
+    total_products: int
+    total_proposals: int
+    total_reports: int
+    total_transactions: int
+
+class AdminKPIs(BaseModel):
+    total_users: int
+    total_products: int
+    completed_exchanges: int
+    total_revenue: float
 
 # Esquema Pydantic para ProposalCreate
 class ProposalCreate(BaseModel):
@@ -2444,119 +2458,170 @@ async def process_payment(
             detail=f"Error interno del servidor: {e}"
         )
     
-@app.get("/admin/chart-data", response_model=ChartDataResponse)
-async def get_admin_chart_data(
-    metric: Literal['users', 'products', 'proposals', 'transactions'] = Query(...),
-    period: Literal['daily', 'weekly', 'monthly', 'yearly'] = Query('monthly'),
+@app.get("/admin/stats/kpis", response_model=AdminKPIs)
+async def get_admin_kpis(
+    # NUEVO: Parámetros opcionales para el rango de fechas
+    start_date: Optional[date] = Query(None, description="Fecha de inicio (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="Fecha de fin (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin_user)
 ):
     """
-    Obtiene datos agregados listos para un gráfico, basados en una métrica
-    y un período de tiempo.
+    Calcula los Key Performance Indicators (KPIs).
+    Si se proveen fechas, los cálculos se acotan a ese rango.
+    De lo contrario, calcula los totales históricos.
+    """
+    try:
+        # --- Lógica de filtrado por fecha ---
+        user_query = db.query(User)
+        product_query = db.query(Product)
+        proposal_query = db.query(Proposal).filter(Proposal.status.in_(['completed', 'accepted']))
+        transaction_query = db.query(Transaction).filter(Transaction.status == 'approved')
+
+        if start_date and end_date:
+            # Aseguramos que el rango sea lógico
+            if start_date > end_date:
+                raise HTTPException(status_code=400, detail="La fecha de inicio no puede ser posterior a la fecha de fin.")
+            
+            # El filtro para 'created_at' o 'updated_at' se aplica a cada consulta
+            end_date_inclusive = end_date + timedelta(days=1)
+            user_query = user_query.filter(User.created_at >= start_date, User.created_at < end_date_inclusive)
+            product_query = product_query.filter(Product.created_at >= start_date, Product.created_at < end_date_inclusive)
+            proposal_query = proposal_query.filter(Proposal.updated_at >= start_date, Proposal.updated_at < end_date_inclusive)
+            transaction_query = transaction_query.filter(Transaction.updated_at >= start_date, Transaction.updated_at < end_date_inclusive)
+
+        # --- Cálculos ---
+        total_users = user_query.count()
+        total_products = product_query.count()
+        completed_exchanges = proposal_query.count()
+        
+        total_revenue_query = transaction_query.with_entities(func.sum(Transaction.amount)).scalar()
+        total_revenue = float(total_revenue_query) if total_revenue_query else 0.0
+
+        return AdminKPIs(
+            total_users=total_users,
+            total_products=total_products,
+            completed_exchanges=completed_exchanges,
+            total_revenue=total_revenue
+        )
+    except Exception as e:
+        print(f"Error al calcular KPIs: {e}")
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(
+            status_code=500, detail="Error al obtener las estadísticas principales."
+        )
+    
+@app.get("/admin/chart-data", response_model=ChartDataResponse)
+async def get_dynamic_chart_data(
+    metric: str = Query(..., description="La métrica a graficar: users, products, proposals, transactions"),
+    period: str = Query("monthly", description="El período de tiempo: daily, weekly, monthly, yearly"),
+    start_date: Optional[date] = Query(None, description="Fecha de inicio del rango (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="Fecha de fin del rango (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user)
+):
+    """
+    Endpoint dinámico que genera datos para gráficos, CON FILTRADO POR RANGO DE FECHAS.
     """
     
-    # 1. Mapear el 'period' a un formato de truncamiento de fecha de SQL
-    # (Usamos 'to_char' para formatear la etiqueta, esto es para PostgreSQL.
-    # Si usas MySQL, necesitarías cambiarlo por DATE_FORMAT)
-    period_format_map = {
-        'daily': ('day', 'YYYY-MM-DD'),
-        'weekly': ('week', 'YYYY-WW'),
-        'monthly': ('month', 'YYYY-MM'),
-        'yearly': ('year', 'YYYY'),
+    metric_map = {
+        "users": (User, User.created_at),
+        "products": (Product, Product.created_at),
+        "proposals": (Proposal, Proposal.updated_at),
+        "transactions": (Transaction, Transaction.updated_at)
     }
+    if metric not in metric_map:
+        raise HTTPException(status_code=400, detail="Métrica no válida.")
+    model, date_column = metric_map[metric]
     
-    if period not in period_format_map:
-        raise HTTPException(status_code=400, detail="Período no válido")
-
-    trunc_period, date_format = period_format_map[period]
-
-    # 2. Mapear la 'metric' al modelo y columna de fecha correctos
-    metric_config = {
-        'users': {
-            "model": User,
-            "date_col": User.created_at,
-            "filter": None,
-            "label": "Nuevos Usuarios"
-        },
-        'products': {
-            "model": Product,
-            "date_col": Product.created_at,
-            "filter": None,
-            "label": "Nuevas Publicaciones"
-        },
-        'proposals': {
-            "model": Proposal,
-            "date_col": Proposal.updated_at, # Usamos updated_at para capturar cuándo se completó
-            "filter": (Proposal.status == 'completed'),
-            "label": "Propuestas Completadas"
-        },
-        'transactions': {
-            "model": Transaction,
-            "date_col": Transaction.updated_at, # Usamos updated_at para capturar cuándo se aprobó
-            "filter": (Transaction.status == 'approved'),
-            "label": "Ventas Aprobadas"
-        },
+    # ... (la lógica de period_formats no cambia)
+    period_formats = {
+        "daily": "YYYY-MM-DD",
+        "weekly": "YYYY-WW",
+        "monthly": "YYYY-MM",
+        "yearly": "YYYY"
     }
+    if period not in period_formats:
+        raise HTTPException(status_code=400, detail="Período no válido.")
+    date_format = period_formats[period]
+    date_trunc_unit = {"daily": "day", "weekly": "week", "monthly": "month", "yearly": "year"}[period]
 
-    if metric not in metric_config:
-        raise HTTPException(status_code=400, detail="Métrica no válida")
-        
-    config = metric_config[metric]
-    model = config["model"]
-    date_col = config["date_col"]
 
-    # 3. Construir la consulta
     try:
-        # Truncamos la fecha y la formateamos como texto para la etiqueta
-        date_label = func.to_char(
-            func.date_trunc(trunc_period, date_col),
-            date_format
-        ).label('label')
-        
         query = db.query(
-            date_label,
+            func.to_char(func.date_trunc(date_trunc_unit, date_column), date_format).label('label'),
             func.count(model.id).label('count')
         )
 
-        # Aplicar filtros si existen (para propuestas 'completed' o transacciones 'approved')
-        if config["filter"] is not None:
-            query = query.filter(config["filter"])
-            
-        # Agrupar y ordenar por la etiqueta de fecha
-        results = query.group_by(date_label).order_by(date_label.asc()).all()
+        # ===== MEJORA CLAVE: APLICAR FILTRO DE FECHAS SI EXISTEN =====
+        if start_date:
+            query = query.filter(date_column >= start_date)
+        if end_date:
+            # Se añade un día al end_date para incluir todo el día final en el rango
+            query = query.filter(date_column < end_date + timedelta(days=1))
+        # =============================================================
 
-        # 4. Formatear la respuesta para Chart.js
+        if metric == 'proposals':
+            query = query.filter(Proposal.status.in_(['completed', 'accepted']))
+        elif metric == 'transactions':
+            query = query.filter(Transaction.status == 'approved')
+
+        results = query.group_by('label').order_by('label').all()
+
         labels = [r.label for r in results]
         data = [r.count for r in results]
-        
+
+        colors = {
+            "users": ("Nuevos Usuarios", 'rgba(79, 70, 229, 1)', 'rgba(79, 70, 229, 0.2)'),
+            "products": ("Nuevos Productos", 'rgba(16, 185, 129, 1)', 'rgba(16, 185, 129, 0.2)'),
+            "proposals": ("Intercambios Completados", 'rgba(2, 132, 199, 1)', 'rgba(2, 132, 199, 0.2)'),
+            "transactions": ("Ingresos por Ventas", 'rgba(217, 119, 6, 1)', 'rgba(217, 119, 6, 0.2)')
+        }
+        label, border_color, bg_color = colors.get(metric, ("Datos", 'rgba(107, 114, 128, 1)', 'rgba(107, 114, 128, 0.2)'))
+
         return ChartDataResponse(
             labels=labels,
-            datasets=[
-                {
-                    "label": config["label"],
-                    "data": data,
-                    "backgroundColor": 'rgba(79, 70, 229, 0.2)', # Color Indigo
-                    "borderColor": 'rgba(79, 70, 229, 1)',
-                    "borderWidth": 2,
-                    "tension": 0.1,
-                    "fill": True,
-                }
-            ]
+            datasets=[{ "label": label, "data": data, "borderColor": border_color, "backgroundColor": bg_color, "borderWidth": 2, "tension": 0.4, "fill": True }]
         )
-
     except Exception as e:
-        print(f"Error al generar datos del gráfico: {e}")
-        # Captura errores comunes de sintaxis de BD (ej. si no es PostgreSQL)
-        if "DATE_FORMAT" in str(e) or "to_char" in str(e):
-             raise HTTPException(
-                status_code=500,
-                detail="Error de base de datos. Es posible que la función de formato de fecha (to_char/DATE_FORMAT) no sea compatible con tu dialecto de SQL."
-            )
-        raise HTTPException(
-            status_code=500,
-            detail="Error interno al procesar los datos del gráfico."
+        print(f"Error al generar gráfico para métrica '{metric}': {e}")
+        raise HTTPException(500, detail=f"Error procesando datos del gráfico para {metric}.")
+    
+@app.get("/admin/stats/charts/completed-exchanges", response_model=ChartDataResponse)
+async def get_completed_exchanges_chart_data(
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin_user)
+):
+    """
+    Endpoint dedicado para obtener los datos del gráfico de INTERCAMBIOS COMPLETADOS por mes.
+    """
+    try:
+        # Consulta específica para agrupar propuestas completadas por mes
+        results = db.query(
+            func.to_char(func.date_trunc('month', Proposal.updated_at), 'YYYY-MM').label('month'),
+            func.count(Proposal.id).label('count')
+        ).filter(
+            Proposal.status.in_(['completed', 'accepted']) # Filtramos solo las que nos interesan
+        ).group_by('month').order_by('month').all()
+
+        # Formatear la respuesta para Chart.js
+        labels = [r.month for r in results]
+        data = [r.count for r in results]
+
+        return ChartDataResponse(
+            labels=labels,
+            datasets=[{
+                "label": "Intercambios Completados",
+                "data": data,
+                "backgroundColor": 'rgba(16, 185, 129, 0.2)', # Verde
+                "borderColor": 'rgba(16, 185, 129, 1)',
+                "borderWidth": 2, "tension": 0.1, "fill": True
+            }]
         )
+    except Exception as e:
+        print(f"Error al generar gráfico de intercambios: {e}")
+        raise HTTPException(500, detail="Error procesando datos del gráfico de intercambios.")
     
 @app.delete("/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user_by_admin(
