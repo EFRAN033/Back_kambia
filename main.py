@@ -95,6 +95,7 @@ class User(Base):
     role = Column(String(50), nullable=False, default='user')
     credits = Column(Integer, default=10, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
+    last_login = Column(DateTime(timezone=True), nullable=True)
 
     interests = relationship("Category", secondary=user_interests_table, back_populates="interested_users", lazy="joined")
     profile_picture = Column(String(500), nullable=True)
@@ -459,6 +460,11 @@ class UserResponse(BaseModel):
     interests: List[str] = []
     profile_picture: str | None = None
     is_active: bool
+
+    products_count: int = 0
+    exchanges_count: int = 0
+    last_login: Optional[datetime] = None
+    reputation: Optional[float] = 0.0
 
     rating_score: Optional[float] = 0.0
     rating_count: int = 0
@@ -828,7 +834,9 @@ async def login(user_login: UserLogin, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Credenciales incorrectas: Correo o contraseña inválidos."
         )
-    
+    db_user.last_login = datetime.utcnow()
+    db.commit()
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": db_user.email, "user_id": db_user.id},
@@ -1091,20 +1099,34 @@ async def get_all_users(
     Obtiene una lista de todos los usuarios. Solo para administradores.
     """
     # Usamos joinedload para cargar las relaciones que UserResponse necesita
+    # Añadimos 'products_owned' para que el conteo sea eficiente
     users = db.query(User).options(
         joinedload(User.interests),
-        joinedload(User.ratings_received)
+        joinedload(User.ratings_received),
+        joinedload(User.products_owned) 
     ).order_by(User.id.asc()).all()
 
     # Debemos construir manualmente la respuesta para
     # asegurarnos de que los campos 'rating_score' y 'rating_count' se calculen
     user_responses = []
     for user in users:
+        # Calcular rating
         rating_count = len(user.ratings_received)
-        if rating_count > 0:
-            rating_score = sum(r.score for r in user.ratings_received) / rating_count
-        else:
-            rating_score = 0.0
+        rating_score = sum(r.score for r in user.ratings_received) / rating_count if rating_count > 0 else 0.0
+
+        # --- INICIO DE LAS NUEVAS LÓGICAS ---
+
+        # 1. Contar productos publicados (eficiente gracias al joinedload)
+        products_count = len(user.products_owned)
+
+        # 2. Contar intercambios completados (propuestas aceptadas o completadas)
+        # Esta consulta es necesaria ya que no se cargó con joinedload
+        exchanges_count = db.query(Proposal).filter(
+            (Proposal.proposer_user_id == user.id) | (Proposal.owner_of_requested_product_id == user.id),
+            Proposal.status.in_(['accepted', 'completed']) # Puedes ajustar estos estados
+        ).count()
+        
+        # --- FIN DE LAS NUEVAS LÓGICAS ---
 
         user_data = UserResponse(
             id=user.id,
@@ -1126,7 +1148,12 @@ async def get_all_users(
             rating_score=rating_score,
             rating_count=rating_count, 
             role=user.role,
-            is_active=user.is_active
+            is_active=user.is_active,
+
+            products_count=products_count,
+            exchanges_count=exchanges_count,
+            last_login=user.last_login, # Se asume que 'last_login' existe en el modelo User
+            reputation=rating_score # 'reputation' es un alias de 'rating_score'
         )
         user_responses.append(user_data)
     

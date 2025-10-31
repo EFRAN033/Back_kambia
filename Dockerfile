@@ -17,5 +17,4 @@ COPY . .
 EXPOSE 8000
 
 # El comando para iniciar la aplicación cuando el contenedor se ejecute
-# Usamos Gunicorn para correr la app de FastAPI (main:app)
-CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "main:app", "--bind", "0.0.0.0:8000"]
+CMD ["sh", "-c", "python create_tables.py && gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000"]
