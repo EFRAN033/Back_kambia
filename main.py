@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, joinedload
 import os
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text, ForeignKey
 from datetime import date, timedelta
 from dotenv import load_dotenv
 from typing import List, Optional, Dict, Literal, Set
@@ -200,6 +201,14 @@ class ProductImage(Base):
 
     product_obj = relationship("Product", back_populates="images")
 
+class ProductLike(Base):
+    __tablename__ = "product_likes"
+    user_id = Column(Integer, ForeignKey('users.id', ondelete="CASCADE"), primary_key=True)
+    product_id = Column(Integer, ForeignKey('products.id', ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+    user = relationship("User")
+
 class Proposal(Base):
     __tablename__ = "proposals"
     id = Column(Integer, primary_key=True, index=True)
@@ -291,8 +300,6 @@ class PaymentRequest(BaseModel):
     installments: int
     payer: dict
     description: str
-
-Base.metadata.create_all(bind=engine, checkfirst=True)
 
 app = FastAPI(
     title="KambiaPe API",
@@ -596,7 +603,9 @@ class ProductResponse(BaseModel):
     views_count: int
     created_at: datetime
     updated_at: datetime
-    
+    isLiked: bool = False
+    likes_count: int = 0
+
     user_username: Optional[str] = None
     user_avatar_url: Optional[str] = None
     category_name: Optional[str] = None
@@ -707,12 +716,42 @@ class ProductUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     condition: Optional[str] = None
-    status: Optional[str] = None # Para cambiar el estado (disponible, intercambiado, etc.)
+    status: Optional[str] = None 
     category_name: Optional[str] = None
     is_for_sale: Optional[bool] = None 
 
+class Comment(Base):
+    __tablename__ = "comments"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    type = Column(String(50), nullable=True)
+    message = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
-# NUEVO: Pydantic model para la información de intercambio dentro de una conversación
+    user = relationship("User", lazy="joined")
+
+class CommentUserResponse(BaseModel):
+    id: int
+    full_name: str
+    profile_picture: Optional[str] = None
+
+    class Config:
+        from_attributes = True    
+
+class CommentCreate(BaseModel):
+    message: str = Field(..., min_length=10)
+    type: Optional[str] = None
+
+class CommentResponse(BaseModel):
+    id: int
+    user: Optional[CommentUserResponse] # Puede ser nulo si el usuario fue borrado
+    type: Optional[str] = None
+    message: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
 class ExchangeDetailsResponse(BaseModel):
     id: int
     offer: ProductPublicResponse
@@ -1488,26 +1527,83 @@ async def delete_proposal(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+async def get_optional_current_user(request: Request, db: Session = Depends(get_db)) -> Optional[User]:
+    """
+    Una dependencia que intenta obtener el usuario actual desde el token.
+    Si no hay token o no es válido, devuelve None en lugar de un error.
+    Esto nos permite tener endpoints que se comportan diferente para usuarios
+    logueados y anónimos.
+    """
+    token = request.headers.get("Authorization")
+    if not token:
+        return None
+    
+    # El token usualmente viene como "Bearer <token>", extraemos solo el token.
+    parts = token.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    
+    token = parts[1]
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = payload.get("user_id")
+        if user_id is None:
+            return None
+        user = db.query(User).filter(User.id == user_id).first()
+        return user
+    except JWTError:
+        return None
+
 @app.get("/products_feed", response_model=List[ProductResponse])
-async def get_all_products_for_feed(db: Session = Depends(get_db)):
+async def get_all_products_for_feed(
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user) # <-- ¡CAMBIO 1: Ahora detecta si hay un usuario logueado!
+):
+    
+    # --- INICIO DE LA MODIFICACIÓN (Obtener conteo de likes) ---
+    
+    # 1. Obtenemos los conteos de likes para TODOS los productos en una sola consulta
+    like_counts_query = db.query(
+        ProductLike.product_id, 
+        func.count(ProductLike.product_id).label('count')
+    ).group_by(ProductLike.product_id).all()
+    
+    # 2. Convertimos el resultado en un diccionario para búsqueda rápida (ej: {1: 10, 2: 5})
+    like_counts_map = {product_id: count for product_id, count in like_counts_query}
+    
+    # --- FIN DE LA MODIFICACIÓN ---
+
+    # Tu consulta original se mantiene exactamente igual
     products_db = db.query(Product).options(
         joinedload(Product.category_obj),
         joinedload(Product.images),
         joinedload(Product.owner),
-        joinedload(Product.exchange_interests) # <-- ✨ CORRECCIÓN CLAVE
+        joinedload(Product.exchange_interests)
     ).filter(Product.is_active == True, Product.status.in_(['available', 'pending_exchange'])).all()
+
+    # --- INICIO CAMBIO 2: Lógica de "Me Gusta" ---
+    # Si hay un usuario logueado, obtenemos la lista de IDs de productos a los que le ha dado like.
+    liked_product_ids: Set[int] = set()
+    if current_user:
+        # (Esto asume que ya añadiste el modelo ProductLike a tu main.py)
+        likes = db.query(ProductLike.product_id).filter(ProductLike.user_id == current_user.id).all()
+        liked_product_ids = {like.product_id for like in likes}
+    # --- FIN CAMBIO 2 ---
 
     response_products = []
     for product in products_db:
+        # Tu lógica original para obtener la miniatura se mantiene intacta
         thumbnail_url = None
         if product.images:
             thumbnail_image = next((img for img in product.images if img.is_thumbnail), None)
             if thumbnail_image:
                 thumbnail_url = thumbnail_image.image_url
-            else:
+            elif product.images: # Nos aseguramos de que la lista no esté vacía
                 thumbnail_url = product.images[0].image_url
 
         response_products.append(ProductResponse(
+            # Todos tus campos originales se conservan
             id=product.id, user_id=product.user_id, category_id=product.category_id, title=product.title,
             description=product.description, current_value_estimate=product.current_value_estimate,
             condition=product.condition, status=product.status, preffered_exchange_items=product.preffered_exchange_items,
@@ -1518,7 +1614,12 @@ async def get_all_products_for_feed(db: Session = Depends(get_db)):
             exchange_interests=[interest.name for interest in product.exchange_interests],
             images=[ProductImageResponse.from_orm(img) for img in product.images],
             user_username=product.owner.full_name if product.owner else "Anónimo",
-            user_avatar_url=product.owner.profile_picture if product.owner else None
+            user_avatar_url=product.owner.profile_picture if product.owner else None, # <--- ¡COMA FALTANTE AÑADIDA!
+
+            # --- INICIO CAMBIO 3: Añadimos el nuevo campo isLiked ---
+            isLiked=product.id in liked_product_ids,
+            likes_count=like_counts_map.get(product.id, 0)
+            # --- FIN CAMBIO 3 ---
         ))
     return response_products
 
@@ -3094,18 +3195,107 @@ async def get_about_us_data(db: Session = Depends(get_db)): # <-- Pide la BD
         for item in gallery_items_db
     ]
 
-    # 3. Construir el JSON final
-    # (Debes replicar la estructura de tu variable global)
     final_data = {
       "hero": {
         "badge": hero_data["hero_badge"],
         "title": hero_data["hero_title"],
-        # ... etc
       },
-      # ... "heroCards", "about", "tabs", "community", "social" ...
       "gallery": gallery_data
     }
     
     return final_data
+
+@app.post("/api/comments", response_model=CommentResponse, status_code=status.HTTP_201_CREATED)
+async def create_comment(
+    comment_data: CommentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user) # <-- Protegido: solo usuarios logueados
+):
+    """
+    Crea un nuevo comentario en la base de datos.
+    El autor del comentario se toma del token del usuario autenticado.
+    """
+    new_comment = Comment(
+        user_id=current_user.id,
+        message=comment_data.message,
+        type=comment_data.type
+    )
+    db.add(new_comment)
+    db.commit()
+    db.refresh(new_comment)
+    return new_comment
+
+
+@app.get("/api/comments", response_model=List[CommentResponse])
+async def get_all_comments(db: Session = Depends(get_db)):
+    """
+    Obtiene todos los comentarios de la base de datos, ordenados del más nuevo al más antiguo.
+    Este endpoint es público.
+    """
+    # Usamos joinedload para cargar la relación 'user' eficientemente
+    comments = db.query(Comment).options(
+        joinedload(Comment.user)
+    ).order_by(Comment.created_at.desc()).all()
+    
+    return comments
+
+Base.metadata.create_all(bind=engine, checkfirst=True)
+
+@app.post("/products/{product_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+async def like_a_product(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Permite a un usuario autenticado dar 'like' a un producto.
+    """
+    # 1. Verificar que el producto exista
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado.")
+
+    # 2. Verificar que el like no exista ya
+    existing_like = db.query(ProductLike).filter(
+        ProductLike.user_id == current_user.id,
+        ProductLike.product_id == product_id
+    ).first()
+    
+    if existing_like:
+        # Si ya existe, no hacemos nada. Devolvemos 204 (No Content)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    # 3. Crear el nuevo like
+    new_like = ProductLike(
+        user_id=current_user.id,
+        product_id=product_id
+    )
+    db.add(new_like)
+    db.commit()
+    
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+@app.delete("/products/{product_id}/like", status_code=status.HTTP_204_NO_CONTENT)
+async def unlike_a_product(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Permite a un usuario autenticado quitar su 'like' de un producto.
+    """
+    # 1. Buscar el 'like'
+    like_to_delete = db.query(ProductLike).filter(
+        ProductLike.user_id == current_user.id,
+        ProductLike.product_id == product_id
+    ).first()
+
+    # 2. Si el 'like' existe, borrarlo
+    if like_to_delete:
+        db.delete(like_to_delete)
+        db.commit()
+    
+    # 3. Si no existía, no hacemos nada (la acción es idempotente)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
