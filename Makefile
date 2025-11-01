@@ -3,8 +3,6 @@ save:
 	git commit -m "update backend"
 	git push origin main
 
-	# --- AÑADE TODO ESTO DEBAJO ---
-
 # --- Variables de Despliegue (NUEVO) ---
 USER = efran18
 IMAGE_NAME = kambiape-back
