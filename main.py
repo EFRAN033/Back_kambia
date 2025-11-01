@@ -3298,4 +3298,43 @@ async def unlike_a_product(
     # 3. Si no existía, no hacemos nada (la acción es idempotente)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
+@app.delete("/api/comments/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_comment(
+    comment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Elimina un comentario por su ID.
+    - Solo el autor original del comentario o un administrador pueden eliminarlo.
+    """
+    
+    # 1. Buscar el comentario en la base de datos
+    # Usamos .first() para obtener el objeto o None
+    comment = db.query(Comment).filter(Comment.id == comment_id).first()
+    
+    # 2. Verificar si el comentario existe
+    if not comment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No se encontró el comentario con el ID {comment_id}"
+        )
+        
+    # 3. Verificar permisos (¡La parte más importante!)
+    # Comprobamos si el ID del usuario actual NO es el autor del comentario
+    # Y TAMPOCO es un administrador.
+    if comment.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para eliminar este comentario."
+        )
+        
+    # 4. Si todo está en orden, eliminar el comentario
+    db.delete(comment)
+    db.commit()
+    
+    # 5. Devolver una respuesta 204 (No Content)
+    # Esto le dice al frontend que todo salió bien, pero no hay nada que devolver.
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
