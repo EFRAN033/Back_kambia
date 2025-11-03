@@ -300,6 +300,7 @@ class PaymentRequest(BaseModel):
     installments: int
     payer: dict
     description: str
+    quantity: int
 
 app = FastAPI(
     title="KambiaPe API",
@@ -2312,12 +2313,7 @@ async def create_preference(
     """
     Crea una preferencia de pago y registra la transacción inicial como pendiente.
     """
-    CREDIT_PACKAGES = {
-        2: 1.00,
-        5: 2.00,
-        10: 5.00
-    }
-    
+ 
     expected_price = CREDIT_PACKAGES.get(purchase_request.quantity)
     if not expected_price or expected_price != purchase_request.unit_price:
         raise HTTPException(
@@ -2476,6 +2472,12 @@ async def handle_mercadopago_webhook(request: Request, db: Session = Depends(get
             
     return Response(status_code=status.HTTP_200_OK)
 
+CREDIT_PACKAGES = {
+    2: 1.00,
+    5: 2.00,
+    10: 5.00
+}
+
 @app.post("/payment/process_payment", status_code=status.HTTP_201_CREATED)
 async def process_payment(
     payment_data: PaymentRequest,
@@ -2484,12 +2486,35 @@ async def process_payment(
 ):
     """
     Procesa un pago directamente usando la Checkout API de Mercado Pago.
+    (VERSIÓN SEGURA VALIDADA)
     """
+
+    # --- 1. VALIDACIÓN DE SEGURIDAD (¡LA PARTE NUEVA!) ---
+    # El backend define los precios, no el frontend.
+    expected_price = CREDIT_PACKAGES.get(payment_data.quantity)
+
+    # Validación 1: ¿Existe ese paquete de créditos?
+    if not expected_price:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"La cantidad de créditos ({payment_data.quantity}) no es un paquete válido."
+        )
+
+    # Validación 2: ¿El precio que el frontend *dice* que va a pagar
+    # coincide con el precio *real* del paquete?
+    if expected_price != payment_data.transaction_amount:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Discrepancia de precio. Se esperaban {expected_price} PEN para {payment_data.quantity} créditos, pero se recibieron {payment_data.transaction_amount} PEN."
+        )
+
+    # --- 2. Procesamiento del Pago (Tu código original) ---
     try:
-        # 1. Prepara el cuerpo de la solicitud para la API de Mercado Pago
-        external_ref = f"user_{current_user.id}_credits_api_{uuid.uuid4()}"
+        # <-- (Opcional) Mejoré el external_ref para incluir la cantidad
+        external_ref = f"user_{current_user.id}_credits_api_{payment_data.quantity}_{uuid.uuid4()}"
+        
         payment_request_body = {
-            "transaction_amount": payment_data.transaction_amount,
+            "transaction_amount": payment_data.transaction_amount, # <-- Ahora sabemos que este monto es correcto
             "token": payment_data.token,
             "description": payment_data.description,
             "installments": payment_data.installments,
@@ -2497,10 +2522,10 @@ async def process_payment(
             "issuer_id": payment_data.issuer_id,
             "payer": payment_data.payer,
             "external_reference": external_ref,
-            "notification_url": "https://kambiape.com/api/webhooks/mercadopago" # Asegúrate que tu URL de webhook sea la correcta
+            "notification_url": "https://kambiape.com/api/webhooks/mercadopago"
         }
 
-        # 2. Usa el SDK para crear el pago (¡esta es la llamada clave!)
+        # 2. Usa el SDK para crear el pago
         payment_response = sdk.payment().create(payment_request_body)
 
         if payment_response.get("status") != 201:
@@ -2515,34 +2540,36 @@ async def process_payment(
         payment_status = payment_result.get("status")
         payment_id_mp = str(payment_result.get("id"))
 
-        # 3. Guarda la transacción en tu base de datos
+        # --- 3. Guarda la transacción en tu base de datos ---
         new_transaction = Transaction(
             user_id=current_user.id,
             mp_payment_id=payment_id_mp,
             external_reference=external_ref,
             status=payment_status,
             description=payment_data.description,
-            amount=payment_data.transaction_amount,
+            amount=payment_data.transaction_amount, # <-- Guardamos el monto validado
             currency_id='PEN',
             payment_method_id=payment_data.payment_method_id
         )
         db.add(new_transaction)
         
-        # 4. Si el pago es aprobado, acredita los créditos INMEDIATAMENTE
+        # --- 4. Si el pago es aprobado, acredita los créditos INMEDIATAMENTE (¡LA FORMA SEGURA!) ---
         if payment_status == 'approved':
             try:
-                # Extraemos la cantidad de créditos desde la descripción
-                parts = payment_data.description.split(' ')
-                credits_to_add = int(parts[2]) # Asumiendo formato "Compra de 10 Créditos..."
+                # ¡YA NO CONFIAMOS EN EL STRING "description"!
+                # Usamos la 'quantity' que validamos al inicio.
+                credits_to_add = payment_data.quantity 
+                
                 current_user.credits += credits_to_add
                 db.add(current_user)
                 print(f"¡ÉXITO! Se añadieron {credits_to_add} créditos al usuario {current_user.id}.")
-            except (IndexError, ValueError) as e:
+            except Exception as e:
+                # Este error ya no debería pasar, pero lo dejamos por seguridad
                 print(f"ADVERTENCIA: Pago {payment_id_mp} aprobado, pero no se pudieron acreditar créditos automáticamente: {e}")
         
         db.commit()
 
-        # 5. Devuelve el resultado al frontend para que muestre el mensaje final
+        # 5. Devuelve el resultado al frontend
         return {
             "status": payment_status,
             "detail": payment_result.get("status_detail", "Pago procesado."),
@@ -3337,4 +3364,4 @@ async def delete_comment(
     # Esto le dice al frontend que todo salió bien, pero no hay nada que devolver.
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
+#app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
