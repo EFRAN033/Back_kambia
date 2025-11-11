@@ -1179,7 +1179,7 @@ async def create_yape_order(
         amount=order.amount,
         description=f"Compra de {order.credits_to_buy} créditos por Yape",
         payment_method_id="yape",
-        # ¡AQUÍ ESTÁ LA MAGIA! Guardamos el nombre de Yape esperado
+        # ¡AQUI ESTA LA MAGIA! Guardamos el nombre de Yape esperado
         external_reference=yape_name_to_match
     )
     db.add(new_transaction)
@@ -1188,12 +1188,16 @@ async def create_yape_order(
     
     print(f"Orden pendiente creada (ID: {new_transaction.id}) para {current_user.full_name} por S/ {order.amount}. Esperando Yape de '{yape_name_to_match}'")
     
+    # --- INICIO DE LA MODIFICACIÓN ---
+    # Ahora devolvemos el nombre normalizado que guardamos en la BD.
     return OrderResponse(
         transaction_id=new_transaction.id,
         user_name=current_user.full_name, # El nombre del dueño de la cuenta KambiaPe
         amount_to_pay=order.amount,
-        message="Orden creada. Por favor, realice el Yape por el monto exacto."
+        message="Orden creada. Por favor, realice el Yape por el monto exacto.",
+        user_name_to_match=yape_name_to_match  # <-- ¡ESTA ES LA LÍNEA AÑADIDA!
     )
+   
 @app.post("/api/v1/confirm-yape-payment", dependencies=[Depends(verify_api_key)])
 async def confirm_yape_payment(payment: YapePayment, db: Session = Depends(get_db)):
     """
@@ -1210,53 +1214,64 @@ async def confirm_yape_payment(payment: YapePayment, db: Session = Depends(get_d
     try:
         payment_amount = Decimal(payment.amount)
         # Normalizar el nombre: quitar espacios extra y poner en mayúsculas
-        yape_name = " ".join(payment.sender_name.upper().split())
+        yape_name_normalized = " ".join(payment.sender_name.upper().split())
     except Exception as e:
         print(f"Error al procesar payload: {e}")
         raise HTTPException(status_code=400, detail="Monto inválido")
 
-    # --- LÓGICA DE CONCILIACIÓN (La parte "descomentada") ---
+    # --- INICIO DE LA LÓGICA CORREGIDA ---
     
-    # 1. Buscar al usuario por nombre. 
-    user = db.query(User).filter(  # <-- CORREGIDO (quitamos 'models.')
-        User.full_name.ilike(f"%{yape_name}%")
-    ).first()
-    
-    if not user:
-        # Si no se encuentra el usuario por nombre
-        print(f"ALERTA: Pago no conciliado. No se encontró usuario con nombre similar a '{yape_name}'.")
-        raise HTTPException(status_code=404, detail="Yape name not matched to any user.")
-
-    # 2. Buscar una transacción pendiente para ESE usuario y ESE monto
-    transaction = db.query(Transaction).filter(  # <-- CORREGIDO (quitamos 'models.')
+    # 1. Buscar la transacción pendiente que coincida EXACTAMENTE
+    #    con el monto y el nombre de Yape normalizado (guardado en external_reference).
+    transaction = db.query(Transaction).filter(
         and_(
-            Transaction.user_id == user.id,
             Transaction.amount == payment_amount,
+            Transaction.external_reference == yape_name_normalized,
             Transaction.status == "pending",
             Transaction.payment_method_id == "yape"
         )
     ).first()
     
     if not transaction:
-        # Si se encontró al usuario, pero no una orden pendiente con ese monto
-        print(f"ALERTA: Pago no conciliado. Se encontró al usuario '{user.full_name}' (ID: {user.id}),")
-        print(f"pero no tiene una orden pendiente por S/ {payment_amount}.")
-        raise HTTPException(status_code=404, detail="Pending transaction for this user and amount not found.")
-    
-    # 3. ¡ÉXITO! Encontramos al usuario Y la transacción
-    
-    # Actualizar la transacción
+        # Si no se encuentra la transacción, el pago no se puede conciliar.
+        print(f"ALERTA: Pago no conciliado. No se encontró orden pendiente")
+        print(f"para el monto S/ {payment_amount} y el nombre Yape '{yape_name_normalized}'.")
+        raise HTTPException(status_code=404, detail="Pending transaction for this amount and Yape name not found.")
+
+    # 2. ¡ÉXITO! Encontramos la transacción. Ahora obtenemos al usuario de esa transacción.
+    user = db.query(User).filter(User.id == transaction.user_id).first()
+    if not user:
+        # Esto sería raro, pero es bueno verificarlo.
+        print(f"ERROR: Se encontró la transacción {transaction.id} pero el usuario {transaction.user_id} no existe.")
+        raise HTTPException(status_code=404, detail="User associated with transaction not found.")
+
+    # 3. Actualizar la transacción
     transaction.status = "approved"
-    transaction.external_reference = f"Yape de: {payment.sender_name}" # Guardamos el nombre de Yape
+    # (Opcional) Sobrescribir la referencia con el nombre exacto recibido (por si hay tildes, etc.)
+    transaction.external_reference = f"Yape de: {payment.sender_name}" 
     
-    # Calcular créditos (Aquí debes poner tu regla de negocio, ej. 1 sol = 10 créditos)
-    # ¡¡IMPORTANTE!! Debes tener esta lógica en tu frontend también.
-    credits_to_add = int(transaction.amount * 10) # Ejemplo: 10 créditos por sol
+    # 4. Calcular créditos (Asegúrate de que esta lógica coincida con tu frontend)
+    # Tu frontend usa `selectedPlan.value.amount`, aquí debemos derivarlo.
+    # Esta es una forma segura de hacerlo basándonos en el precio.
+    credits_to_add = 0
+    if transaction.amount == Decimal('1.00'):
+        credits_to_add = 2
+    elif transaction.amount == Decimal('2.00'):
+        credits_to_add = 5
+    elif transaction.amount == Decimal('5.00'):
+        credits_to_add = 10
+    else:
+        # Si el monto no coincide con ningún plan, no añadas créditos y registra el error.
+        print(f"ERROR: Monto S/ {transaction.amount} aprobado pero no coincide con ningún paquete de créditos.")
+        db.commit() # Guardamos el estado "approved" pero no damos créditos.
+        raise HTTPException(status_code=400, detail="Amount does not match any credit package.")
     
-    # Actualizar los créditos del usuario
+    # 5. Actualizar los créditos del usuario
     user.credits += credits_to_add
     
     try:
+        db.add(transaction) # Añadir transacción actualizada
+        db.add(user) # Añadir usuario actualizado
         db.commit()
         db.refresh(user)
         db.refresh(transaction)
