@@ -2,7 +2,8 @@ from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, F
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime, date, timedelta
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Date, Text, DECIMAL, ForeignKey
+from decimal import Decimal
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Date, Text, DECIMAL, ForeignKey, BigInteger, Numeric
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, joinedload
 import os
@@ -21,7 +22,7 @@ import aiofiles
 import uuid
 import json
 from sqlalchemy import or_, and_
-import mercadopago
+#import mercadopago
 from typing import List, Dict
 import asyncio
 from broadcaster import Broadcast
@@ -29,6 +30,7 @@ from sqlalchemy.orm import joinedload
 #Importaciones para la validacion de dni con PeruDevs
 import requests
 import re
+from fastapi import Depends, HTTPException, Header
 
 
 load_dotenv()
@@ -48,12 +50,12 @@ PERUDEVS_API_KEY = os.getenv("PERUDEVS_DNI_KEY")
 PERUDEVS_DNI_URL = os.getenv("PERUDEVS_DNI_URL")
 
 # Carga el Access Token de Mercado Pago
-MERCADOPAGO_ACCESS_TOKEN = os.getenv("MERCADOPAGO_ACCESS_TOKEN")
-if not MERCADOPAGO_ACCESS_TOKEN:
-    raise ValueError("La variable de entorno MERCADOPAGO_ACCESS_TOKEN no está configurada.")
+#MERCADOPAGO_ACCESS_TOKEN = os.getenv("MERCADOPAGO_ACCESS_TOKEN")
+#if not MERCADOPAGO_ACCESS_TOKEN:
+#    raise ValueError("La variable de entorno MERCADOPAGO_ACCESS_TOKEN no está configurada.")
 
 # Inicializa el SDK de Mercado Pago
-sdk = mercadopago.SDK(MERCADOPAGO_ACCESS_TOKEN)
+#sdk = mercadopago.SDK(MERCADOPAGO_ACCESS_TOKEN)
 
 # Ahora creamos las instancias de la base de datos
 engine = create_engine(DATABASE_URL)
@@ -98,6 +100,7 @@ class User(Base):
     credits = Column(Integer, default=10, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     last_login = Column(DateTime(timezone=True), nullable=True)
+    transactions = relationship("Transaction", back_populates="user")
 
     interests = relationship("Category", secondary=user_interests_table, back_populates="interested_users", lazy="joined")
     profile_picture = Column(String(500), nullable=True)
@@ -141,25 +144,21 @@ class UserReport(Base):
 
 class Transaction(Base):
     __tablename__ = "transactions"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     
-    mp_payment_id = Column(String(255), unique=True, nullable=True, index=True)
-    mp_preference_id = Column(String(255), nullable=True)
-    external_reference = Column(String(255), nullable=True, index=True)
+    id = Column(BigInteger, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    status = Column(String(50), nullable=False, index=True) # 'pending', 'approved', 'failed'
+    amount = Column(Numeric(10, 2), nullable=False)
+    description = Column(String(255))
+    payment_method_id = Column(String(100), default='yape') # Usaremos esto para Yape
     
-    status = Column(String(50), nullable=False, index=True)
-    description = Column(String(255), nullable=True)
-    currency_id = Column(String(3), nullable=False, default="PEN")
-    amount = Column(DECIMAL(10, 2), nullable=False)
+    # Este campo es para el ID de pago de MercadoPago, pero lo usaremos para el nombre del Yape
+    external_reference = Column(String(255), index=True, nullable=True) 
     
-    payment_method_id = Column(String(100), nullable=True)
-    payment_type_id = Column(String(100), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    user = relationship("User")
+    user = relationship("User", back_populates="transactions")
 
 
 class Product(Base):
@@ -271,10 +270,10 @@ class UserRatingResponse(UserRatingBase):
     class Config:
         from_attributes = True 
 
-class CreditPurchaseRequest(BaseModel):
-    quantity: int = Field(..., gt=0) 
-    unit_price: float = Field(..., gt=0.0)
-    title: str = "Compra de Créditos para KambiaPe"
+#class CreditPurchaseRequest(BaseModel):
+#    quantity: int = Field(..., gt=0) 
+#    unit_price: float = Field(..., gt=0.0)
+#    title: str = "Compra de Créditos para KambiaPe"
 
 class HeroCard(BaseModel):
     id: int
@@ -292,15 +291,36 @@ class UserReportResponse(BaseModel):
     class Config:
         from_attributes = True
 
-class PaymentRequest(BaseModel):
-    token: str
-    issuer_id: str
-    payment_method_id: str
-    transaction_amount: float
-    installments: int
-    payer: dict
-    description: str
-    quantity: int
+class YapePayment(BaseModel):
+    """Payload que envía la App de Android"""
+    sender_name: str
+    amount: str # Lo recibimos como string "2" o "2.00"
+
+class OrderCreate(BaseModel):
+    """Payload que envía Vue.js para crear la orden"""
+    amount: Decimal
+    credits_to_buy: int
+    yape_name: str # <-- ¡AÑADIDO! Para recibir el nombre de Yape
+    yape_phone: Optional[str] = "000000000" # (Lo pide tu Vue, lo dejamos opcional)
+
+class OrderResponse(BaseModel):
+    """Respuesta que se envía a Vue.js"""
+    transaction_id: int
+    user_name: str # Nombre del usuario de KambiaPe
+    amount_to_pay: Decimal
+    message: str
+    user_name_to_match: str
+
+#class PaymentRequest(BaseModel):
+#    card_token: str
+#    issuer_id: str
+#    payment_method_id: str
+#    installments: int
+#    identificationType: str
+#    identificationNumber: str
+#    cardholderName: str
+#    planName: str
+#    amount: float
 
 app = FastAPI(
     title="KambiaPe API",
@@ -1119,6 +1139,140 @@ class UserUpdate(BaseModel):
     bio: str | None = None
     dni: str | None = None
     interest_ids: Optional[List[int]] = []
+
+SECRET_API_KEY = os.getenv("YAPE_API_KEY")
+
+async def verify_api_key(x_api_key: str = Header(None)):
+    """Verifica que el 'x-api-key' enviado desde Android sea correcto."""
+    
+    if not SECRET_API_KEY:
+        # Error si olvidaste poner la clave en el .env
+        print("ERROR DE SERVIDOR: YAPE_API_KEY no está configurada en .env")
+        raise HTTPException(status_code=500, detail="Server configuration error")
+    
+    if x_api_key != SECRET_API_KEY:
+        # Error si la app envía una clave incorrecta o no la envía
+        print(f"ALERTA: Intento de acceso fallido a la API de Yape. Clave usada: {x_api_key}")
+        raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+    
+    # Si la clave es correcta, permite el acceso
+    return True
+
+@app.post("/api/v1/create-yape-order", response_model=OrderResponse)
+async def create_yape_order(
+    order: OrderCreate, 
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    """
+    (PARA VUE.JS) Crea una orden de pago "pendiente" en la base de datos.
+    El frontend llama a esto ANTES de que el usuario vaya a Yapear.
+    """
+    
+    # Normalizamos el nombre de Yape que el usuario ingresó
+    yape_name_to_match = " ".join(order.yape_name.upper().split())
+    
+    # Crear la transacción pendiente en la base de datos
+    new_transaction = Transaction(
+        user_id=current_user.id,
+        status="pending",
+        amount=order.amount,
+        description=f"Compra de {order.credits_to_buy} créditos por Yape",
+        payment_method_id="yape",
+        # ¡AQUÍ ESTÁ LA MAGIA! Guardamos el nombre de Yape esperado
+        external_reference=yape_name_to_match
+    )
+    db.add(new_transaction)
+    db.commit()
+    db.refresh(new_transaction)
+    
+    print(f"Orden pendiente creada (ID: {new_transaction.id}) para {current_user.full_name} por S/ {order.amount}. Esperando Yape de '{yape_name_to_match}'")
+    
+    return OrderResponse(
+        transaction_id=new_transaction.id,
+        user_name=current_user.full_name, # El nombre del dueño de la cuenta KambiaPe
+        amount_to_pay=order.amount,
+        message="Orden creada. Por favor, realice el Yape por el monto exacto."
+    )
+@app.post("/api/v1/confirm-yape-payment", dependencies=[Depends(verify_api_key)])
+async def confirm_yape_payment(payment: YapePayment, db: Session = Depends(get_db)):
+    """
+    (PARA ANDROID) Recibe la notificación de Yape desde la app scraper,
+    busca la orden pendiente y asigna los créditos.
+    """
+    
+    print("="*30)
+    print("¡PAGO DE YAPE RECIBIDO DESDE ANDROID!")
+    print(f"Remitente: {payment.sender_name}")
+    print(f"Monto: S/ {payment.amount}")
+    print("="*30)
+    
+    try:
+        payment_amount = Decimal(payment.amount)
+        # Normalizar el nombre: quitar espacios extra y poner en mayúsculas
+        yape_name = " ".join(payment.sender_name.upper().split())
+    except Exception as e:
+        print(f"Error al procesar payload: {e}")
+        raise HTTPException(status_code=400, detail="Monto inválido")
+
+    # --- LÓGICA DE CONCILIACIÓN (La parte "descomentada") ---
+    
+    # 1. Buscar al usuario por nombre. 
+    user = db.query(User).filter(  # <-- CORREGIDO (quitamos 'models.')
+        User.full_name.ilike(f"%{yape_name}%")
+    ).first()
+    
+    if not user:
+        # Si no se encuentra el usuario por nombre
+        print(f"ALERTA: Pago no conciliado. No se encontró usuario con nombre similar a '{yape_name}'.")
+        raise HTTPException(status_code=404, detail="Yape name not matched to any user.")
+
+    # 2. Buscar una transacción pendiente para ESE usuario y ESE monto
+    transaction = db.query(Transaction).filter(  # <-- CORREGIDO (quitamos 'models.')
+        and_(
+            Transaction.user_id == user.id,
+            Transaction.amount == payment_amount,
+            Transaction.status == "pending",
+            Transaction.payment_method_id == "yape"
+        )
+    ).first()
+    
+    if not transaction:
+        # Si se encontró al usuario, pero no una orden pendiente con ese monto
+        print(f"ALERTA: Pago no conciliado. Se encontró al usuario '{user.full_name}' (ID: {user.id}),")
+        print(f"pero no tiene una orden pendiente por S/ {payment_amount}.")
+        raise HTTPException(status_code=404, detail="Pending transaction for this user and amount not found.")
+    
+    # 3. ¡ÉXITO! Encontramos al usuario Y la transacción
+    
+    # Actualizar la transacción
+    transaction.status = "approved"
+    transaction.external_reference = f"Yape de: {payment.sender_name}" # Guardamos el nombre de Yape
+    
+    # Calcular créditos (Aquí debes poner tu regla de negocio, ej. 1 sol = 10 créditos)
+    # ¡¡IMPORTANTE!! Debes tener esta lógica en tu frontend también.
+    credits_to_add = int(transaction.amount * 10) # Ejemplo: 10 créditos por sol
+    
+    # Actualizar los créditos del usuario
+    user.credits += credits_to_add
+    
+    try:
+        db.commit()
+        db.refresh(user)
+        db.refresh(transaction)
+    except Exception as e:
+        db.rollback()
+        print(f"Error de Base de Datos al guardar: {e}")
+        raise HTTPException(status_code=500, detail="Database error during transaction commit.")
+    
+    print("="*30)
+    print("¡CONCILIACIÓN EXITOSA!")
+    print(f"Usuario: {user.full_name} (ID: {user.id})")
+    print(f"Créditos añadidos: {credits_to_add} (Total ahora: {user.credits})")
+    print(f"Transacción ID: {transaction.id} marcada como 'approved'")
+    print("="*30)
+
+    return {"status": "success", "message": "Payment confirmed and credits added."}
 
 @app.get("/proposals/{proposal_id}/messages", response_model=List[MessageResponse])
 async def get_proposal_messages(
@@ -2304,288 +2458,318 @@ async def update_message_read_status(
 
 from fastapi.staticfiles import StaticFiles
 
-@app.post("/payment/create_preference", status_code=status.HTTP_201_CREATED)
-async def create_preference(
-    purchase_request: CreditPurchaseRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Crea una preferencia de pago y registra la transacción inicial como pendiente.
-    """
- 
-    expected_price = CREDIT_PACKAGES.get(purchase_request.quantity)
-    if not expected_price or expected_price != purchase_request.unit_price:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="La cantidad o el precio de la compra no son válidos."
-        )
-        
-    try:
-        external_ref = f"user_{current_user.id}_credits_{purchase_request.quantity}_{uuid.uuid4()}"
+#@app.post("/payment/create_preference", status_code=status.HTTP_201_CREATED)
+#async def create_preference(
+#    purchase_request: CreditPurchaseRequest,
+#    db: Session = Depends(get_db),
+#    current_user: User = Depends(get_current_user)
+#):
+#    """
+#    Crea una preferencia de pago y registra la transacción inicial como pendiente.
+#    """
+# 
+#    expected_price = CREDIT_PACKAGES.get(purchase_request.quantity)
+#    if not expected_price or expected_price != purchase_request.unit_price:
+#        raise HTTPException(
+#            status_code=status.HTTP_400_BAD_REQUEST,
+#            detail="La cantidad o el precio de la compra no son válidos."
+#        )
+#        
+#    try:
+#        external_ref = f"user_{current_user.id}_credits_{purchase_request.quantity}_{uuid.uuid4()}"
+#
+#
+#        preference_data = {
+#            "items": [
+#                {
+#                    "title": purchase_request.title,
+#                   "quantity": 1,
+#                    "currency_id": "PEN",
+#                    "unit_price": expected_price
+#                }
+#            ],
+#            "payer": {
+#                "name": current_user.full_name,
+#                "email": current_user.email,
+#                "identification": { "type": "DNI", "number": current_user.dni }
+#            },
+#            "back_urls": {
+#                "success": "https://kambiape.com/payment-success",
+#                "failure": "https://kambiape.com/payment-failure",
+#                "pending": "https://kambiape.com/payment-pending"
+#            },
+#            # LA LÍNEA DE AUTO_RETURN FUE ELIMINADA
+#            "external_reference": external_ref,
+#            "notification_url": "https://kambiape.com/api/webhooks/mercadopago"
+#        }
+#
+#        # --- INICIO DE LA CORRECCIÓN ---
+#        
+#        # 6. Usa el SDK para crear la preferencia
+#        preference_response = sdk.preference().create(preference_data)
+#        
+#        # 7. VERIFICA LA RESPUESTA ANTES DE USARLA
+#        # Si la respuesta no tiene un status 201 (creado), algo salió mal.
+#        if preference_response.get("status") != 201:
+#            # Imprimimos la respuesta completa para ver el error real
+#            print("--- ERROR DE MERCADO PAGO ---")
+#            print(preference_response)
+#            print("-----------------------------")
+#            # Lanzamos un error claro
+#            raise HTTPException(
+#                status_code=status.HTTP_400_BAD_REQUEST,
+#                detail=f"Error al crear la preferencia en Mercado Pago: {preference_response.get('response', {}).get('message', 'Error desconocido')}"
+#            )
+#
+#        preference = preference_response["response"]
+#        
+#        # --- FIN DE LA CORRECCIÓN ---
+#
+#        # Crea el registro en tu base de datos
+#        new_transaction = Transaction(
+#            user_id=current_user.id,
+#           mp_preference_id=preference["id"],
+#            external_reference=external_ref,
+#            status='pending',
+#            description=purchase_request.title,
+#            amount=expected_price,
+#            currency_id='PEN'
+#        )
+#        db.add(new_transaction)
+#        db.commit()
+#        
+#        return {"preference_id": preference["id"], "init_point": preference["init_point"]}
+#
+#    except Exception as e:
+#        db.rollback()
+#        # Si el error viene del HTTPException que lanzamos, lo pasamos directamente
+#        if isinstance(e, HTTPException):
+#            raise e
+#        # Si es otro tipo de error, mantenemos el mensaje genérico
+#        print(f"Error inesperado al crear preferencia: {e}")
+#        raise HTTPException(
+#            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#            detail=f"Error interno del servidor: {e}"
+#        )
+#
+#@app.post("/webhooks/mercadopago", status_code=status.HTTP_200_OK)
+#async def handle_mercadopago_webhook(request: Request, db: Session = Depends(get_db)):
+#    """
+#    Recibe, procesa y actúa sobre las notificaciones de pago de Mercado Pago.
+#    body = await request.json()
+#    print("--- WEBHOOK RECIBIDO ---")
+#    print(body)
+#    
+#    # Mercado Pago a veces notifica sobre 'merchant_order' y otras sobre 'payment'
+#    topic = body.get("topic") or body.get("type")
+#    
+#    if topic == "payment" or "payment" in body.get("resource", ""):
+#        payment_id = body.get("data", {}).get("id")
+#        if not payment_id:
+#            # A veces el ID viene en otra parte, seamos flexibles
+#            resource_url = body.get("resource")
+#            if resource_url:
+#                payment_id = resource_url.split('/')[-1]
+#
+#        if not payment_id:
+#            print("Webhook: No se pudo encontrar el ID del pago en la notificación.")
+#            return Response(status_code=status.HTTP_200_OK)
+#
+#        try:
+#            print(f"Procesando payment_id: {payment_id}")
+#            # 1. Obtener la información completa del pago desde Mercado Pago
+#            payment_info_response = sdk.payment().get(payment_id)
+#            payment_info = payment_info_response.get("response")
+#
+#            if not payment_info:
+#                print(f"Webhook: No se pudo obtener información para el payment_id {payment_id}")
+#                return Response(status_code=status.HTTP_200_OK)
+#            
+#            # 2. Buscar la transacción en nuestra base de datos por external_reference
+#           external_ref = payment_info.get("external_reference")            db_transaction = db.query(Transaction).filter(Transaction.external_reference == external_ref).first()
+#
+#            if not db_transaction:
+#                print(f"Webhook: No se encontró transacción para external_reference {external_ref}")
+#                return Response(status_code=status.HTTP_200_OK)
+#
+#            # 3. Actualizar nuestra transacción solo si el estado ha cambiado
+#            if db_transaction.status == payment_info["status"]:
+#                print(f"Transacción {db_transaction.id} ya está en estado '{db_transaction.status}'. No se necesita actualización.")
+#                return Response(status_code=status.HTTP_200_OK)
+#
+#            db_transaction.status = payment_info["status"]
+#            db_transaction.mp_payment_id = payment_id
+#            db_transaction.updated_at = datetime.utcnow()
+#            
+#            # 4. Lógica de negocio: Si el pago fue aprobado, ¡damos los créditos!
+#            if db_transaction.status == 'approved':
+#                user_to_credit = db.query(User).filter(User.id == db_transaction.user_id).first()
+#                if user_to_credit:
+#                    try:
+#                        parts = external_ref.split('_')
+#                        credits_to_add = int(parts[3])
+#                        user_to_credit.credits += credits_to_add
+#                        db.add(user_to_credit)
+#                        print(f"¡ÉXITO! Se añadieron {credits_to_add} créditos al usuario {user_to_credit.id}. Nuevo saldo: {user_to_credit.credits}")
+#                    except (IndexError, ValueError) as e:
+#                        print(f"Error al parsear créditos desde external_reference '{external_ref}': {e}")
+#            
+#            db.commit()
+#
+#            print(f"Transacción {db_transaction.id} actualizada a estado '{db_transaction.status}'.")
+#
+#        except Exception as e:
+#            db.rollback()
+#            print(f"Error CRÍTICO procesando webhook de Mercado Pago: {e}")
+#            # Aún así devolvemos 200 para que MP no siga reintentando un webhook que falla
+#            return Response(status_code=status.HTTP_200_OK)
+#            
+#    return Response(status_code=status.HTTP_200_OK)
 
-        preference_data = {
-            "items": [
-                {
-                    "title": purchase_request.title,
-                    "quantity": 1,
-                    "currency_id": "PEN",
-                    "unit_price": expected_price
-                }
-            ],
-            "payer": {
-                "name": current_user.full_name,
-                "email": current_user.email,
-                "identification": { "type": "DNI", "number": current_user.dni }
-            },
-            "back_urls": {
-                "success": "https://kambiape.com/payment-success",
-                "failure": "https://kambiape.com/payment-failure",
-                "pending": "https://kambiape.com/payment-pending"
-            },
-            # LA LÍNEA DE AUTO_RETURN FUE ELIMINADA
-            "external_reference": external_ref,
-            "notification_url": "https://kambiape.com/api/webhooks/mercadopago"
-        }
+#CREDIT_PACKAGES = {
+#    2: 1.00,
+#    5: 2.00,
+#    10: 5.00
+#}
 
-        # --- INICIO DE LA CORRECCIÓN ---
-        
-        # 6. Usa el SDK para crear la preferencia
-        preference_response = sdk.preference().create(preference_data)
-        
-        # 7. VERIFICA LA RESPUESTA ANTES DE USARLA
-        # Si la respuesta no tiene un status 201 (creado), algo salió mal.
-        if preference_response.get("status") != 201:
-            # Imprimimos la respuesta completa para ver el error real
-            print("--- ERROR DE MERCADO PAGO ---")
-            print(preference_response)
-            print("-----------------------------")
-            # Lanzamos un error claro
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Error al crear la preferencia en Mercado Pago: {preference_response.get('response', {}).get('message', 'Error desconocido')}"
-            )
+#@app.post("/payment/process_payment", status_code=status.HTTP_201_CREATED)
+#async def process_payment(
+#    payment_data: PaymentRequest, # <-- USA EL NUEVO MODELO
+#    db: Session = Depends(get_db),
+#    current_user: User = Depends(get_current_user)
+#):
+#    """
+#    Procesa un pago directamente usando la Checkout API de Mercado Pago.
+#    (VERSIÓN CORREGIDA PARA COINCIDIR CON EL FRONTEND)
+#    """
 
-        preference = preference_response["response"]
-        
-        # --- FIN DE LA CORRECCIÓN ---
+    # --- 1. VALIDACIÓN DE SEGURIDAD (Adaptada) ---
 
-        # Crea el registro en tu base de datos
-        new_transaction = Transaction(
-            user_id=current_user.id,
-            mp_preference_id=preference["id"],
-            external_reference=external_ref,
-            status='pending',
-            description=purchase_request.title,
-            amount=expected_price,
-            currency_id='PEN'
-        )
-        db.add(new_transaction)
-        db.commit()
-        
-        return {"preference_id": preference["id"], "init_point": preference["init_point"]}
-
-    except Exception as e:
-        db.rollback()
-        # Si el error viene del HTTPException que lanzamos, lo pasamos directamente
-        if isinstance(e, HTTPException):
-            raise e
-        # Si es otro tipo de error, mantenemos el mensaje genérico
-        print(f"Error inesperado al crear preferencia: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error interno del servidor: {e}"
-        )
-
-@app.post("/webhooks/mercadopago", status_code=status.HTTP_200_OK)
-async def handle_mercadopago_webhook(request: Request, db: Session = Depends(get_db)):
-    """
-    Recibe, procesa y actúa sobre las notificaciones de pago de Mercado Pago.
-    """
-    body = await request.json()
-    print("--- WEBHOOK RECIBIDO ---")
-    print(body)
-    
-    # Mercado Pago a veces notifica sobre 'merchant_order' y otras sobre 'payment'
-    topic = body.get("topic") or body.get("type")
-    
-    if topic == "payment" or "payment" in body.get("resource", ""):
-        payment_id = body.get("data", {}).get("id")
-        if not payment_id:
-            # A veces el ID viene en otra parte, seamos flexibles
-            resource_url = body.get("resource")
-            if resource_url:
-                payment_id = resource_url.split('/')[-1]
-
-        if not payment_id:
-            print("Webhook: No se pudo encontrar el ID del pago en la notificación.")
-            return Response(status_code=status.HTTP_200_OK)
-
-        try:
-            print(f"Procesando payment_id: {payment_id}")
-            # 1. Obtener la información completa del pago desde Mercado Pago
-            payment_info_response = sdk.payment().get(payment_id)
-            payment_info = payment_info_response.get("response")
-
-            if not payment_info:
-                print(f"Webhook: No se pudo obtener información para el payment_id {payment_id}")
-                return Response(status_code=status.HTTP_200_OK)
-            
-            # 2. Buscar la transacción en nuestra base de datos por external_reference
-            external_ref = payment_info.get("external_reference")
-            db_transaction = db.query(Transaction).filter(Transaction.external_reference == external_ref).first()
-
-            if not db_transaction:
-                print(f"Webhook: No se encontró transacción para external_reference {external_ref}")
-                return Response(status_code=status.HTTP_200_OK)
-
-            # 3. Actualizar nuestra transacción solo si el estado ha cambiado
-            if db_transaction.status == payment_info["status"]:
-                print(f"Transacción {db_transaction.id} ya está en estado '{db_transaction.status}'. No se necesita actualización.")
-                return Response(status_code=status.HTTP_200_OK)
-
-            db_transaction.status = payment_info["status"]
-            db_transaction.mp_payment_id = payment_id
-            db_transaction.updated_at = datetime.utcnow()
-            
-            # 4. Lógica de negocio: Si el pago fue aprobado, ¡damos los créditos!
-            if db_transaction.status == 'approved':
-                user_to_credit = db.query(User).filter(User.id == db_transaction.user_id).first()
-                if user_to_credit:
-                    try:
-                        parts = external_ref.split('_')
-                        credits_to_add = int(parts[3])
-                        user_to_credit.credits += credits_to_add
-                        db.add(user_to_credit)
-                        print(f"¡ÉXITO! Se añadieron {credits_to_add} créditos al usuario {user_to_credit.id}. Nuevo saldo: {user_to_credit.credits}")
-                    except (IndexError, ValueError) as e:
-                        print(f"Error al parsear créditos desde external_reference '{external_ref}': {e}")
-            
-            db.commit()
-            print(f"Transacción {db_transaction.id} actualizada a estado '{db_transaction.status}'.")
-
-        except Exception as e:
-            db.rollback()
-            print(f"Error CRÍTICO procesando webhook de Mercado Pago: {e}")
-            # Aún así devolvemos 200 para que MP no siga reintentando un webhook que falla
-            return Response(status_code=status.HTTP_200_OK)
-            
-    return Response(status_code=status.HTTP_200_OK)
-
-CREDIT_PACKAGES = {
-    2: 1.00,
-    5: 2.00,
-    10: 5.00
-}
-
-@app.post("/payment/process_payment", status_code=status.HTTP_201_CREATED)
-async def process_payment(
-    payment_data: PaymentRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Procesa un pago directamente usando la Checkout API de Mercado Pago.
-    (VERSIÓN SEGURA VALIDADA)
-    """
-
-    # --- 1. VALIDACIÓN DE SEGURIDAD (¡LA PARTE NUEVA!) ---
+    # Mapear planName a quantity (¡NUEVO!)
+#    plan_to_quantity = {
+#        "Básico": 2,
+#        "Popular": 5,
+#        "Pro": 10
+#    }
+#    quantity_from_plan = plan_to_quantity.get(payment_data.planName)
+#
+ #   if not quantity_from_plan:
+  #      raise HTTPException(
+   #         status_code=status.HTTP_400_BAD_REQUEST,
+    #        detail=f"El nombre del plan ({payment_data.planName}) no es un paquete válido."
+ #       )
+#
     # El backend define los precios, no el frontend.
-    expected_price = CREDIT_PACKAGES.get(payment_data.quantity)
+  #  expected_price = CREDIT_PACKAGES.get(quantity_from_plan)
 
-    # Validación 1: ¿Existe ese paquete de créditos?
-    if not expected_price:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"La cantidad de créditos ({payment_data.quantity}) no es un paquete válido."
-        )
+   # if not expected_price:
+    #    raise HTTPException(
+     #       status_code=status.HTTP_400_BAD_REQUEST,
+      #      detail=f"La cantidad de créditos ({quantity_from_plan}) no es un paquete válido."
+       # )
 
-    # Validación 2: ¿El precio que el frontend *dice* que va a pagar
-    # coincide con el precio *real* del paquete?
-    if expected_price != payment_data.transaction_amount:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Discrepancia de precio. Se esperaban {expected_price} PEN para {payment_data.quantity} créditos, pero se recibieron {payment_data.transaction_amount} PEN."
-        )
+    # Compara el precio real con el precio que envió el frontend
+    #if expected_price != payment_data.amount:
+     #   raise HTTPException(
+      #      status_code=status.HTTP_400_BAD_REQUEST,
+       #     detail=f"Discrepancia de precio. Se esperaban {expected_price} PEN para {quantity_from_plan} créditos, pero se recibieron {payment_data.amount} PEN."
+        #)
 
-    # --- 2. Procesamiento del Pago (Tu código original) ---
-    try:
-        # <-- (Opcional) Mejoré el external_ref para incluir la cantidad
-        external_ref = f"user_{current_user.id}_credits_api_{payment_data.quantity}_{uuid.uuid4()}"
-        
-        payment_request_body = {
-            "transaction_amount": payment_data.transaction_amount, # <-- Ahora sabemos que este monto es correcto
-            "token": payment_data.token,
-            "description": payment_data.description,
-            "installments": payment_data.installments,
-            "payment_method_id": payment_data.payment_method_id,
-            "issuer_id": payment_data.issuer_id,
-            "payer": payment_data.payer,
-            "external_reference": external_ref,
-            "notification_url": "https://kambiape.com/api/webhooks/mercadopago"
-        }
+    # --- 2. Procesamiento del Pago (Adaptado) ---
+    #try:
+     #   external_ref = f"user_{current_user.id}_credits_api_{quantity_from_plan}_{uuid.uuid4()}"
+
+        # Construir el 'payer' dict que MP espera (¡NUEVO!)
+      #  payer_data = {
+       #     "email": current_user.email, # <-- Usamos el email del usuario logueado
+        #    "identification": {
+         #      "number": payment_data.identificationNumber
+          #  },
+           # "first_name": payment_data.cardholderName.split(' ')[0],
+            #"last_name": " ".join(payment_data.cardholderName.split(' ')[1:])
+        #}
+
+        #description = f"Compra de {quantity_from_plan} Kambitos ({payment_data.planName})"
+
+        #payment_request_body = {
+        #    "transaction_amount": payment_data.amount, # Usa 'amount'
+        #    "token": payment_data.card_token, # Usa 'card_token'
+        #    "description": description,
+        #    "installments": payment_data.installments,
+        #    "payment_method_id": payment_data.payment_method_id,
+        #    "issuer_id": payment_data.issuer_id,
+        #    "payer": payer_data, # Usa el dict 'payer_data' construido
+        #    "external_reference": external_ref,
+        #    "notification_url": "https://kambiape.com/api/webhooks/mercadopago"
+       # }
 
         # 2. Usa el SDK para crear el pago
-        payment_response = sdk.payment().create(payment_request_body)
+        #payment_response = sdk.payment().create(payment_request_body)
 
-        if payment_response.get("status") != 201:
-            print("--- ERROR DE MERCADO PAGO ---")
-            print(payment_response)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=payment_response.get("response", {}).get("message", "Error al procesar el pago.")
-            )
+        # --- ¡¡¡LOG DE DIAGNÓSTICO AÑADIDO AQUÍ!!! ---
+        # Imprime la respuesta COMPLETA de Mercado Pago en tu terminal de FastAPI
+        #print("--- RESPUESTA COMPLETA DE MERCADO PAGO ---")
+        #print(payment_response)
+        # --- FIN DEL LOG ---
 
-        payment_result = payment_response["response"]
-        payment_status = payment_result.get("status")
-        payment_id_mp = str(payment_result.get("id"))
+        #if payment_response.get("status") != 201:
+            # Este print ya lo tenías, es para errores
+        #    print("--- ERROR DE MERCADO PAGO (Status no 201) ---")
+        #    print(payment_response)
+        #    raise HTTPException(
+        #        status_code=status.HTTP_400_BAD_REQUEST,
+        #        detail=payment_response.get("response", {}).get("message", "Error al procesar el pago.")
+        #    )
+
+        #payment_result = payment_response["response"]
+        #payment_status = payment_result.get("status")
+        #payment_id_mp = str(payment_result.get("id"))
 
         # --- 3. Guarda la transacción en tu base de datos ---
-        new_transaction = Transaction(
-            user_id=current_user.id,
-            mp_payment_id=payment_id_mp,
-            external_reference=external_ref,
-            status=payment_status,
-            description=payment_data.description,
-            amount=payment_data.transaction_amount, # <-- Guardamos el monto validado
-            currency_id='PEN',
-            payment_method_id=payment_data.payment_method_id
-        )
-        db.add(new_transaction)
-        
-        # --- 4. Si el pago es aprobado, acredita los créditos INMEDIATAMENTE (¡LA FORMA SEGURA!) ---
-        if payment_status == 'approved':
-            try:
-                # ¡YA NO CONFIAMOS EN EL STRING "description"!
-                # Usamos la 'quantity' que validamos al inicio.
-                credits_to_add = payment_data.quantity 
-                
-                current_user.credits += credits_to_add
-                db.add(current_user)
-                print(f"¡ÉXITO! Se añadieron {credits_to_add} créditos al usuario {current_user.id}.")
-            except Exception as e:
-                # Este error ya no debería pasar, pero lo dejamos por seguridad
-                print(f"ADVERTENCIA: Pago {payment_id_mp} aprobado, pero no se pudieron acreditar créditos automáticamente: {e}")
-        
-        db.commit()
+        #new_transaction = Transaction(
+        #    user_id=current_user.id,
+        #    mp_payment_id=payment_id_mp,
+        #    external_reference=external_ref,
+        #    status=payment_status,
+        #    description=description,
+        #    amount=payment_data.amount, # Guardamos el monto validado
+        #    currency_id='PEN',
+        #    payment_method_id=payment_data.payment_method_id
+        #)
+        #db.add(new_transaction)
 
-        # 5. Devuelve el resultado al frontend
-        return {
-            "status": payment_status,
-            "detail": payment_result.get("status_detail", "Pago procesado."),
-            "id": payment_id_mp
-        }
+        # --- 4. Si el pago es aprobado, acredita los créditos INMEDIATAMENTE ---
+        #new_credits_balance = current_user.credits # Prepara el valor para la respuesta
+        #if payment_status == 'approved':
+        #    try:
+        #        credits_to_add = quantity_from_plan # Usa la quantity validada
+##               current_user.credits += credits_to_add
+        #        new_credits_balance = current_user.credits # Actualiza el valor para la respuesta
+         #       db.add(current_user)
+          #      print(f"¡ÉXITO! Se añadieron {credits_to_add} créditos al usuario {current_user.id}.")
+          #  except Exception as e:
+           #     print(f"ADVERTENCIA: Pago {payment_id_mp} aprobado, pero no se pudieron acreditar créditos automáticamente: {e}")
 
-    except Exception as e:
-        db.rollback()
-        if isinstance(e, HTTPException):
-            raise e
-        print(f"Error inesperado al procesar el pago: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error interno del servidor: {e}"
-        )
-    
+        #db.commit()
+
+        # 5. Devuelve el resultado al frontend (¡CON LOS CRÉDITOS NUEVOS!)
+        #return {
+         #   "status": payment_status,
+          #  "detail": payment_result.get("status_detail", "Pago procesado."),
+           # "id": payment_id_mp,
+            #"newCredits": new_credits_balance # <-- ¡ESTO ES LO QUE EL FRONTEND NECESITA!
+        #}
+
+    #except Exception as e:
+     #   db.rollback()
+      #  if isinstance(e, HTTPException):
+       #     raise e
+       # print(f"Error inesperado al procesar el pago: {e}")
+        #raise HTTPException(
+         #   status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+          #  detail=f"Error interno del servidor: {e}"
+        #)
+
 @app.get("/admin/stats/kpis", response_model=AdminKPIs)
 async def get_admin_kpis(
     # NUEVO: Parámetros opcionales para el rango de fechas
@@ -2657,7 +2841,7 @@ async def get_dynamic_chart_data(
         "users": (User, User.created_at),
         "products": (Product, Product.created_at),
         "proposals": (Proposal, Proposal.updated_at),
-        "transactions": (Transaction, Transaction.updated_at)
+        #"transactions": (Transaction, Transaction.updated_at)
     }
     if metric not in metric_map:
         raise HTTPException(status_code=400, detail="Métrica no válida.")
@@ -3364,4 +3548,4 @@ async def delete_comment(
     # Esto le dice al frontend que todo salió bien, pero no hay nada que devolver.
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-#app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
+app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
