@@ -3042,85 +3042,50 @@ async def get_user_proposals_history(
 
 
 # 3. Endpoint de ADMIN para ACTUALIZAR datos del Hero (para HeroSection-admin.vue)
-@app.put("/api/admin/hero", response_model=HeroData)
-async def update_hero_data_in_db(
-    db: Session = Depends(get_db),
-    admin: User = Depends(get_current_admin_user),
-    # Textos generales
-    titleLine1: str = Form(...),
-    titleLine2: str = Form(...),
-    badgeText: str = Form(...),
-    paragraphText: str = Form(...),
-    button1Text: str = Form(...),
-    button2Text: str = Form(...),
-    # Textos de las tarjetas
-    card_0_alt: str = Form(...),
-    card_0_badge: str = Form(...),
-    card_1_alt: str = Form(...),
-    card_1_badge: str = Form(...),
-    card_2_alt: str = Form(...),
-    card_2_badge: str = Form(...),
-    # Imágenes opcionales de las tarjetas
-    card_0_image: Optional[UploadFile] = File(None),
-    card_1_image: Optional[UploadFile] = File(None),
-    card_2_image: Optional[UploadFile] = File(None)
+# (Asegúrate de tener 'Response' importado al inicio de tu main.py)
+# from fastapi import ..., Response
+
+@app.get("/api/hero", response_model=HeroData)
+async def get_hero_data(
+    response: Response, # <--- ¡CAMBIO 1: Inyectar la respuesta!
+    db: Session = Depends(get_db)
 ):
     """
-    Actualiza los datos del Hero Section directamente en la base de datos.
+    Devuelve los datos del Hero Section para el público, leyendo desde la base de datos.
     """
-    try:
-        # Guardar textos generales
-        set_setting(db, "hero_titleLine1", titleLine1)
-        set_setting(db, "hero_titleLine2", titleLine2)
-        set_setting(db, "hero_badgeText", badgeText)
-        set_setting(db, "hero_paragraphText", paragraphText)
-        set_setting(db, "hero_button1Text", button1Text)
-        set_setting(db, "hero_button2Text", button2Text)
+    # 1. Definir todas las claves que necesitamos para el Hero
+    keys = [
+        "hero_titleLine1", "hero_titleLine2", "hero_badgeText",
+        "hero_paragraphText", "hero_button1Text", "hero_button2Text",
+        "hero_card_0_alt", "hero_card_0_badge", "hero_card_0_imageUrl",
+        "hero_card_1_alt", "hero_card_1_badge", "hero_card_1_imageUrl",
+        "hero_card_2_alt", "hero_card_2_badge", "hero_card_2_imageUrl",
+    ]
 
-        # Guardar textos de tarjetas
-        card_texts = {
-            "hero_card_0_alt": card_0_alt, "hero_card_0_badge": card_0_badge,
-            "hero_card_1_alt": card_1_alt, "hero_card_1_badge": card_1_badge,
-            "hero_card_2_alt": card_2_alt, "hero_card_2_badge": card_2_badge,
-        }
-        for key, value in card_texts.items():
-            set_setting(db, key, value)
+    # 2. Obtener todos los valores de la BD con una sola consulta
+    settings = get_settings_dict(db, keys)
 
-        # Procesar y guardar imágenes si se subieron
-        card_images = {
-            "hero_card_0_imageUrl": card_0_image,
-            "hero_card_1_imageUrl": card_1_image,
-            "hero_card_2_imageUrl": card_2_image,
-        }
-        
-        # Obtener las URLs existentes por si no se sube una nueva imagen
-        existing_urls = {
-            "hero_card_0_imageUrl": db.query(SiteSettings).filter(SiteSettings.key == "hero_card_0_imageUrl").first(),
-            "hero_card_1_imageUrl": db.query(SiteSettings).filter(SiteSettings.key == "hero_card_1_imageUrl").first(),
-            "hero_card_2_imageUrl": db.query(SiteSettings).filter(SiteSettings.key == "hero_card_2_imageUrl").first(),
-        }
-
-        for key, image_file in card_images.items():
-            if image_file and image_file.filename:
-                # Si se sube una imagen nueva, guárdala
-                image_url = await save_upload_file(image_file)
-                set_setting(db, key, image_url)
-            elif existing_urls.get(key) is None:
-                # Si no se sube imagen Y no había ninguna antes, ponlo en None (o string vacío)
-                set_setting(db, key, None)
-            # Si no se sube imagen pero ya existía una (existing_urls.get(key) no es None),
-            # simplemente no hacemos nada y dejamos el valor que ya estaba en la BD.
-
-        db.commit()
-
-    except Exception as e:
-        db.rollback()
-        print(f"Error al guardar los datos del Hero: {e}")
-        raise HTTPException(status_code=500, detail=f"Error al guardar los datos del Hero: {e}")
-
-    # Devolver los datos actualizados desde la BD para confirmar
-    return await get_hero_data(db)
-
+    # 3. Construir la respuesta en el formato que el frontend espera
+    hero_response = HeroData(
+        titleLine1=settings.get("hero_titleLine1", "Intercambia fácil, seguro"),
+        titleLine2=settings.get("hero_titleLine2", "y sin comisiones"),
+        badgeText=settings.get("hero_badgeText", "Bienvenido a KambiaPe"),
+        paragraphText=settings.get("hero_paragraphText", "Publica lo que ya no usas y encuentra lo que necesitas."),
+        button1Text=settings.get("hero_button1Text", "Publicar objeto"),
+        button2Text=settings.get("hero_button2Text", "Buzón"),
+        cards=[
+            HeroCard(id=1, alt=settings.get("hero_card_0_alt"), badge=settings.get("hero_card_0_badge"), imageUrl=settings.get("hero_card_0_imageUrl")),
+            HeroCard(id=2, alt=settings.get("hero_card_1_alt"), badge=settings.get("hero_card_1_badge"), imageUrl=settings.get("hero_card_1_imageUrl")),
+            HeroCard(id=3, alt=settings.get("hero_card_2_alt"), badge=settings.get("hero_card_2_badge"), imageUrl=settings.get("hero_card_2_imageUrl")),
+        ]
+    )
+    
+    # --- ¡CAMBIO 2: Añadir los encabezados antes de retornar! ---
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    
+    return hero_response
 
 # --- 3. ASEGÚRATE de que esta función (que me diste) esté en tu main.py ---
 def set_setting(db: Session, key: str, value: Optional[str]): # Permitir que value sea None
@@ -3325,7 +3290,10 @@ async def admin_update_about_us_data(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Ocurrió un error al guardar los datos: {e}")
 
 @app.get("/api/aboutus")
-async def get_about_us_data(db: Session = Depends(get_db)): # <-- Pide la BD
+async def get_about_us_data(
+    response: Response, # <--- ¡CAMBIO 1: Inyectar la respuesta!
+    db: Session = Depends(get_db)
+):
     """
     Devuelve los datos de la página "Nosotros" para el público general,
     leyendo desde la base de datos.
@@ -3399,35 +3367,10 @@ async def get_about_us_data(db: Session = Depends(get_db)): # <-- Pide la BD
       "gallery": gallery_data
     }
     
-    return final_data
-
-# --- FIN DEL CÓDIGO COMPLETO ---
-@app.get("/api/aboutus")
-async def get_about_us_data(db: Session = Depends(get_db)): # <-- Pide la BD
-    """
-    Devuelve los datos de la página "Nosotros" para el público general.
-    """
-    # 1. Obtener textos de la BD
-    hero_keys = ["hero_badge", "hero_title", "hero_paragraph", "hero_btn1", "hero_btn2"]
-    hero_data = get_settings_dict(db, hero_keys)
-    
-    # ... (obtener los otros textos de "about", "tabs", "community", "social")
-    
-    # 2. Obtener galería de la BD
-    gallery_items_db = db.query(GalleryItem).filter(GalleryItem.page_section == "about_us").order_by(GalleryItem.order).all()
-    
-    gallery_data = [
-        {"id": item.id, "alt": item.alt_text, "imageUrl": item.image_url}
-        for item in gallery_items_db
-    ]
-
-    final_data = {
-      "hero": {
-        "badge": hero_data["hero_badge"],
-        "title": hero_data["hero_title"],
-      },
-      "gallery": gallery_data
-    }
+    # --- ¡CAMBIO 2: Añadir los encabezados antes de retornar! ---
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     
     return final_data
 
