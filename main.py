@@ -1198,11 +1198,48 @@ async def create_yape_order(
         user_name_to_match=yape_name_to_match  # <-- ¡ESTA ES LA LÍNEA AÑADIDA!
     )
    
+# --- Función de Tokenización y Puntuación (Añadir esta función) ---
+def calculate_name_match_score(expected_name: str, sender_name: str) -> float:
+    """
+    Calcula un puntaje de coincidencia entre dos nombres para el Fuzzy Matching.
+    Se normaliza, tokeniza y se cuenta la intersección de palabras.
+    """
+    import re 
+
+    if not expected_name or not sender_name:
+        return 0.0
+
+    # 1. Normalizar y Tokenizar
+    def tokenize(name: str) -> set:
+        # Reemplaza caracteres no alfanuméricos (incluyendo puntuación) por un espacio
+        # Incluye soporte para tildes y ñ (áéíóúÁÉÍÓÚñÑ)
+        cleaned_name = re.sub(r'[^a-zA-ZáéíóúÁÉÍÓÚñÑ\s]', ' ', name).upper()
+        # Divide por espacios y filtra tokens vacíos
+        tokens = cleaned_name.split()
+        return set(tokens)
+
+    expected_tokens = tokenize(expected_name)
+    sender_tokens = tokenize(sender_name)
+
+    # Si la lista esperada está vacía, retorna 0
+    if not expected_tokens:
+        return 0.0
+
+    # 2. Calcular Intersección
+    common_tokens = expected_tokens.intersection(sender_tokens)
+
+    # 3. Puntuación (Intersección / Total de palabras esperadas)
+    score = len(common_tokens) / len(expected_tokens)
+
+    return score
+# --- Fin de la función de ayuda ---
+
+
 @app.post("/api/v1/confirm-yape-payment", dependencies=[Depends(verify_api_key)])
 async def confirm_yape_payment(payment: YapePayment, db: Session = Depends(get_db)):
     """
     (PARA ANDROID) Recibe la notificación de Yape desde la app scraper,
-    busca la orden pendiente y asigna los créditos.
+    busca la orden pendiente y asigna los créditos. (¡CON FUZZY MATCHING!)
     """
     
     print("="*30)
@@ -1213,29 +1250,47 @@ async def confirm_yape_payment(payment: YapePayment, db: Session = Depends(get_d
     
     try:
         payment_amount = Decimal(payment.amount)
-        # Normalizar el nombre: quitar espacios extra y poner en mayúsculas
-        yape_name_normalized = " ".join(payment.sender_name.upper().split())
     except Exception as e:
         print(f"Error al procesar payload: {e}")
         raise HTTPException(status_code=400, detail="Monto inválido")
 
-    # --- INICIO DE LA LÓGICA CORREGIDA ---
+    # --- INICIO DE LA LÓGICA CORREGIDA CON FUZZY MATCHING ---
     
-    # 1. Buscar la transacción pendiente que coincida EXACTAMENTE
-    #    con el monto y el nombre de Yape normalizado (guardado en external_reference).
-    transaction = db.query(Transaction).filter(
+    # 1. Buscar TODAS las transacciones pendientes que coincidan con el monto.
+    pending_transactions = db.query(Transaction).filter(
         and_(
             Transaction.amount == payment_amount,
-            Transaction.external_reference == yape_name_normalized,
             Transaction.status == "pending",
             Transaction.payment_method_id == "yape"
         )
-    ).first()
+    ).all()
+
+    best_match_transaction = None
+    best_score = 0.0
+    # Umbral mínimo de coincidencia (60% de las palabras clave del nombre deben coincidir)
+    MATCH_THRESHOLD = 0.6 
+
+    # 2. Iterar sobre las transacciones y encontrar la mejor coincidencia por nombre
+    for tx in pending_transactions:
+        # 'external_reference' guarda el nombre ingresado por el usuario (el "esperado")
+        expected_name = tx.external_reference 
+        # 'payment.sender_name' es el nombre que viene de Yape (el "remitente")
+        
+        # !! AQUÍ ESTABA EL ERROR: AHORA LA FUNCIÓN SÍ EXISTE !!
+        current_score = calculate_name_match_score(expected_name, payment.sender_name)
+
+        print(f"Tx ID {tx.id}: Score '{expected_name}' vs '{payment.sender_name}' -> {current_score:.2f}")
+
+        if current_score > best_score and current_score >= MATCH_THRESHOLD:
+            best_score = current_score
+            best_match_transaction = tx
+
+    transaction = best_match_transaction
     
     if not transaction:
         # Si no se encuentra la transacción, el pago no se puede conciliar.
         print(f"ALERTA: Pago no conciliado. No se encontró orden pendiente")
-        print(f"para el monto S/ {payment_amount} y el nombre Yape '{yape_name_normalized}'.")
+        print(f"para el monto S/ {payment_amount} y el nombre Yape '{payment.sender_name}'.")
         raise HTTPException(status_code=404, detail="Pending transaction for this amount and Yape name not found.")
 
     # 2. ¡ÉXITO! Encontramos la transacción. Ahora obtenemos al usuario de esa transacción.
@@ -1247,12 +1302,10 @@ async def confirm_yape_payment(payment: YapePayment, db: Session = Depends(get_d
 
     # 3. Actualizar la transacción
     transaction.status = "approved"
-    # (Opcional) Sobrescribir la referencia con el nombre exacto recibido (por si hay tildes, etc.)
-    transaction.external_reference = f"Yape de: {payment.sender_name}" 
+    # Guardamos el nombre exacto recibido y el score de coincidencia
+    transaction.external_reference = f"Yape de: {payment.sender_name} (Score: {best_score:.2f})" 
     
-    # 4. Calcular créditos (Asegúrate de que esta lógica coincida con tu frontend)
-    # Tu frontend usa `selectedPlan.value.amount`, aquí debemos derivarlo.
-    # Esta es una forma segura de hacerlo basándonos en el precio.
+    # 4. Calcular créditos (La lógica por monto se mantiene)
     credits_to_add = 0
     if transaction.amount == Decimal('1.00'):
         credits_to_add = 2
@@ -1261,9 +1314,8 @@ async def confirm_yape_payment(payment: YapePayment, db: Session = Depends(get_d
     elif transaction.amount == Decimal('5.00'):
         credits_to_add = 10
     else:
-        # Si el monto no coincide con ningún plan, no añadas créditos y registra el error.
         print(f"ERROR: Monto S/ {transaction.amount} aprobado pero no coincide con ningún paquete de créditos.")
-        db.commit() # Guardamos el estado "approved" pero no damos créditos.
+        db.commit() 
         raise HTTPException(status_code=400, detail="Amount does not match any credit package.")
     
     # 5. Actualizar los créditos del usuario
