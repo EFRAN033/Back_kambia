@@ -3525,4 +3525,4 @@ async def delete_comment(
     # Esto le dice al frontend que todo salió bien, pero no hay nada que devolver.
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
+#app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
