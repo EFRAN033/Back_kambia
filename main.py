@@ -97,7 +97,7 @@ class User(Base):
     bio = Column(Text, nullable=True)
     dni = Column(String(12), nullable=True, unique=True)
     role = Column(String(50), nullable=False, default='user')
-    credits = Column(Integer, default=10, nullable=False)
+    credits = Column(Integer, default=5, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     last_login = Column(DateTime(timezone=True), nullable=True)
     transactions = relationship("Transaction", back_populates="user")
@@ -1286,6 +1286,25 @@ async def confirm_yape_payment(payment: YapePayment, db: Session = Depends(get_d
     print(f"Créditos añadidos: {credits_to_add} (Total ahora: {user.credits})")
     print(f"Transacción ID: {transaction.id} marcada como 'approved'")
     print("="*30)
+
+    # --- INICIO DE LA MODIFICACIÓN (WebSocket broadcast) ---
+    try:
+        # Preparamos el mensaje para el frontend
+        payload = json.dumps({
+            "type": "credits_updated",  # Un nuevo tipo de mensaje
+            "data": {
+                "new_credits": user.credits, # El nuevo total de créditos
+                "credits_added": credits_to_add, # Cuántos se añadieron
+                "amount_paid": float(transaction.amount) # Cuánto pagó
+            }
+        })
+        # Publicamos en el canal de ese usuario (igual que el chat)
+        await broadcast.publish(channel=f"user_{user.id}", message=payload)
+        print(f"Notificación WebSocket de créditos enviada al canal user_{user.id}")
+    except Exception as ws_error:
+        # Si el WebSocket falla (ej. Redis caído), no debe romper la transacción
+        print(f"ERROR: No se pudo enviar la notificación WebSocket: {ws_error}")
+    # --- FIN DE LA MODIFICACIÓN ---
 
     return {"status": "success", "message": "Payment confirmed and credits added."}
 
